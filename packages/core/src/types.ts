@@ -34,6 +34,7 @@ export interface ResolvedCard {
   setCode: string;
   collectorNumber: string;
   languageFallback: boolean;
+  finishes: Finish[];
 }
 
 export interface CollectionEntry {

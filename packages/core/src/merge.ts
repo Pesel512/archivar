@@ -1,4 +1,4 @@
-import type { CollectionEntry } from './types.js';
+import type { CollectionEntry, Finish } from './types.js';
 
 export function mergeKey(
   entry: Pick<CollectionEntry, 'card' | 'finish' | 'language' | 'condition'>,
@@ -14,11 +14,22 @@ function mergeTags(existing: readonly string[], incoming: readonly string[]): st
   return result;
 }
 
+export type AddScanResult =
+  | { ok: true; entries: CollectionEntry[] }
+  | { ok: false; reason: 'invalid_finish'; available: Finish[] };
+
 export function addScan(
   entries: CollectionEntry[],
   scan: Omit<CollectionEntry, 'id' | 'quantity' | 'exportedAt'> & { quantity?: number },
   newId: () => string,
-): CollectionEntry[] {
+): AddScanResult {
+  // Archidekt erzwingt beim CSV-Import stillschweigend den Standardwert, wenn das Finish bei
+  // der Druckversion nicht existiert (siehe STATE_A.md, Block A11) — solche Einträge werden
+  // hier gar nicht erst übernommen.
+  if (!scan.card.finishes.includes(scan.finish)) {
+    return { ok: false, reason: 'invalid_finish', available: scan.card.finishes };
+  }
+
   const key = mergeKey(scan);
   const quantity = scan.quantity ?? 1;
   const existingIndex = entries.findIndex(
@@ -37,14 +48,21 @@ export function addScan(
       scannedAt: scan.scannedAt,
       exportedAt: null,
     };
-    return [...entries, newEntry];
+    return { ok: true, entries: [...entries, newEntry] };
   }
 
-  return entries.map((entry, index) =>
-    index === existingIndex
-      ? { ...entry, quantity: entry.quantity + quantity, tags: mergeTags(entry.tags, scan.tags) }
-      : entry,
-  );
+  return {
+    ok: true,
+    entries: entries.map((entry, index) =>
+      index === existingIndex
+        ? {
+            ...entry,
+            quantity: entry.quantity + quantity,
+            tags: mergeTags(entry.tags, scan.tags),
+          }
+        : entry,
+    ),
+  };
 }
 
 export function markExported(

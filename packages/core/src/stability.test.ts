@@ -38,6 +38,7 @@ function card(overrides: Partial<ResolvedCard> = {}): ResolvedCard {
     setCode: 'DOM',
     collectorNumber: '168',
     languageFallback: false,
+    finishes: ['nonfoil', 'foil'],
     ...overrides,
   };
 }

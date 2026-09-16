@@ -25,6 +25,7 @@ function resolvedCard(overrides: Partial<ResolvedCard> = {}): ResolvedCard {
     setCode: 'ST',
     collectorNumber: '1',
     languageFallback: false,
+    finishes: ['nonfoil'],
     ...overrides,
   };
 }

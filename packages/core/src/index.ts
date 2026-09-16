@@ -4,3 +4,4 @@ export * from './stability.js';
 export * from './merge.js';
 export * from './csv.js';
 export * from './set-suggest.js';
+export * from './resolve-finish.js';

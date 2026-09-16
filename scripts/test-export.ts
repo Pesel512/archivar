@@ -11,6 +11,7 @@
 import { randomUUID } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
 import {
+  resolveFinish,
   toArchidektCsv,
   type CollectionEntry,
   type Condition,
@@ -29,10 +30,13 @@ interface CardSpec {
   tags: string[];
 }
 
-// Real existierende Karten, per curl gegen die Scryfall-API verifiziert:
-// - m11/149 (Lightning Bolt, en): finishes nonfoil+foil
-// - dmr/457 (Counterspell / „Gegenzauber“): hat eine deutsche Druckfassung
-// - acr/262 (Sword of Light and Shadow, en): finish etched
+// Real existierende Karten, per curl gegen die Scryfall-API verifiziert (Stand siehe
+// STATE_A.md, Block A11 — dmr/457 wurde dort ersetzt, weil seine finishes nur ['foil']
+// enthalten, Archidekt beim ursprünglichen Testimport also das angeforderte nonfoil
+// stillschweigend auf den Standardwert zurückgesetzt hat):
+// - m11/149 (Lightning Bolt, en): finishes ['nonfoil', 'foil']
+// - cmm/81 (Counterspell / „Gegenzauber“, de verfügbar): finishes ['nonfoil', 'foil']
+// - acr/262 (Sword of Light and Shadow, en): finishes ['etched']
 const CARDS: CardSpec[] = [
   {
     set: 'm11',
@@ -53,8 +57,8 @@ const CARDS: CardSpec[] = [
     tags: ['Test'],
   },
   {
-    set: 'dmr',
-    number: '457',
+    set: 'cmm',
+    number: '81',
     lookupLang: 'de',
     finish: 'nonfoil',
     language: 'de',
@@ -85,11 +89,27 @@ async function main(): Promise<void> {
       );
     }
 
+    const finishCheck = resolveFinish(spec.finish, result.card.finishes);
+    if (!finishCheck.ok) {
+      const available = finishCheck.available.length > 0 ? finishCheck.available.join(', ') : '(keine)';
+      throw new Error(
+        `Finish "${spec.finish}" ist bei ${spec.set}/${spec.number} nicht gültig — ` +
+          `verfügbare Finishes: ${available}. Archidekt würde beim Import stillschweigend ` +
+          `auf den Standardwert zurückfallen (siehe STATE_A.md, Block A11).`,
+      );
+    }
+    if (finishCheck.adjusted) {
+      console.warn(
+        `Finish "${spec.finish}" nicht verfügbar bei ${spec.set}/${spec.number}, ` +
+          `verwende stattdessen "${finishCheck.finish}".`,
+      );
+    }
+
     entries.push({
       id: randomUUID(),
       card: result.card,
       quantity: 1,
-      finish: spec.finish,
+      finish: finishCheck.finish,
       language: spec.language,
       condition: spec.condition,
       tags: spec.tags,
@@ -99,7 +119,7 @@ async function main(): Promise<void> {
 
     console.log(
       `Aufgelöst: ${result.card.name} (${result.card.setCode} ${result.card.collectorNumber}), ` +
-        `languageFallback=${result.card.languageFallback}`,
+        `finish=${finishCheck.finish}, languageFallback=${result.card.languageFallback}`,
     );
   }
 

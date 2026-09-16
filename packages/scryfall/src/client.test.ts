@@ -49,6 +49,7 @@ function rawCard(
     name: string;
     set: string;
     collector_number: string;
+    finishes: string[];
   }> = {},
 ) {
   return {
@@ -56,6 +57,7 @@ function rawCard(
     name: 'Shivan Dragon',
     set: 'dom',
     collector_number: '168',
+    finishes: ['nonfoil', 'foil'],
     ...overrides,
   };
 }
@@ -115,6 +117,7 @@ describe('createScryfallClient — getCardBySetNumber', () => {
         setCode: 'DOM',
         collectorNumber: '168',
         languageFallback: true,
+        finishes: ['nonfoil', 'foil'],
       },
     });
     expect(calls).toHaveLength(2);
@@ -283,6 +286,7 @@ describe('createScryfallClient — getCardByName', () => {
         setCode: 'DOM',
         collectorNumber: '168',
         languageFallback: false,
+        finishes: ['nonfoil', 'foil'],
       },
     });
   });

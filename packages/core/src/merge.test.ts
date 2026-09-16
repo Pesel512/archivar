@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { addScan, markExported, mergeKey, pendingExport } from './merge.js';
+import { addScan, markExported, mergeKey, pendingExport, type AddScanResult } from './merge.js';
 import type { CollectionEntry, ResolvedCard } from './types.js';
+
+function expectOk(result: AddScanResult): CollectionEntry[] {
+  if (!result.ok) throw new Error(`expected ok result, got: ${JSON.stringify(result)}`);
+  return result.entries;
+}
 
 function resolvedCard(overrides: Partial<ResolvedCard> = {}): ResolvedCard {
   return {
@@ -9,6 +14,7 @@ function resolvedCard(overrides: Partial<ResolvedCard> = {}): ResolvedCard {
     setCode: 'DOM',
     collectorNumber: '168',
     languageFallback: false,
+    finishes: ['nonfoil', 'foil'],
     ...overrides,
   };
 }
@@ -58,7 +64,7 @@ describe('mergeKey', () => {
 describe('addScan', () => {
   it('gleicher Key in nicht exportiertem Eintrag → Menge erhöht', () => {
     const entries = [entry({ quantity: 2 })];
-    const result = addScan(entries, scanInput({ quantity: 3 }), nextId());
+    const result = expectOk(addScan(entries, scanInput({ quantity: 3 }), nextId()));
 
     expect(result).toHaveLength(1);
     expect(result[0]).toMatchObject({ id: 'e1', quantity: 5 });
@@ -66,7 +72,7 @@ describe('addScan', () => {
 
   it('anderes Finish → neuer Eintrag', () => {
     const entries = [entry()];
-    const result = addScan(entries, scanInput({ finish: 'foil' }), nextId());
+    const result = expectOk(addScan(entries, scanInput({ finish: 'foil' }), nextId()));
 
     expect(result).toHaveLength(2);
     expect(result[1]).toMatchObject({ id: 'new-1', finish: 'foil', quantity: 1 });
@@ -74,7 +80,7 @@ describe('addScan', () => {
 
   it('andere Sprache → neuer Eintrag', () => {
     const entries = [entry()];
-    const result = addScan(entries, scanInput({ language: 'de' }), nextId());
+    const result = expectOk(addScan(entries, scanInput({ language: 'de' }), nextId()));
 
     expect(result).toHaveLength(2);
     expect(result[1]).toMatchObject({ id: 'new-1', language: 'de', quantity: 1 });
@@ -82,7 +88,7 @@ describe('addScan', () => {
 
   it('anderer Zustand → neuer Eintrag', () => {
     const entries = [entry()];
-    const result = addScan(entries, scanInput({ condition: 'LP' }), nextId());
+    const result = expectOk(addScan(entries, scanInput({ condition: 'LP' }), nextId()));
 
     expect(result).toHaveLength(2);
     expect(result[1]).toMatchObject({ id: 'new-1', condition: 'LP', quantity: 1 });
@@ -91,7 +97,7 @@ describe('addScan', () => {
   it('exportierter Eintrag mit gleichem Key wird nicht verändert, neuer Eintrag entsteht', () => {
     const exported = entry({ exportedAt: '2026-01-01T00:00:00.000Z', quantity: 4 });
     const entries = [exported];
-    const result = addScan(entries, scanInput(), nextId());
+    const result = expectOk(addScan(entries, scanInput(), nextId()));
 
     expect(result).toHaveLength(2);
     expect(result[0]).toEqual(exported);
@@ -100,7 +106,7 @@ describe('addScan', () => {
 
   it('vereinigt Tags beim Merge ohne Duplikate, Reihenfolge stabil', () => {
     const entries = [entry({ tags: ['alpha', 'beta'] })];
-    const result = addScan(entries, scanInput({ tags: ['beta', 'gamma'] }), nextId());
+    const result = expectOk(addScan(entries, scanInput({ tags: ['beta', 'gamma'] }), nextId()));
 
     expect(result[0]?.tags).toEqual(['alpha', 'beta', 'gamma']);
   });
@@ -108,7 +114,7 @@ describe('addScan', () => {
   it('lässt andere Einträge beim Merge unverändert', () => {
     const other = entry({ id: 'other', card: resolvedCard({ scryfallId: 'sc-2' }) });
     const target = entry({ id: 'target', quantity: 1 });
-    const result = addScan([other, target], scanInput({ quantity: 1 }), nextId());
+    const result = expectOk(addScan([other, target], scanInput({ quantity: 1 }), nextId()));
 
     expect(result).toHaveLength(2);
     expect(result[0]).toBe(other);
@@ -116,7 +122,7 @@ describe('addScan', () => {
   });
 
   it('neuer Eintrag ohne quantity-Angabe erhält Menge 1', () => {
-    const result = addScan([], scanInput(), nextId());
+    const result = expectOk(addScan([], scanInput(), nextId()));
     expect(result[0]).toMatchObject({ quantity: 1 });
   });
 
@@ -129,6 +135,28 @@ describe('addScan', () => {
 
     expect(entries).toEqual(snapshot);
     expect(entries[0]).toBe(original);
+  });
+
+  it('Finish nicht in card.finishes → Eintrag wird nicht übernommen', () => {
+    const entries = [entry()];
+    const result = addScan(
+      entries,
+      scanInput({ finish: 'etched', card: resolvedCard({ finishes: ['nonfoil', 'foil'] }) }),
+      nextId(),
+    );
+
+    expect(result).toEqual({ ok: false, reason: 'invalid_finish', available: ['nonfoil', 'foil'] });
+    expect(entries).toHaveLength(1); // Eingabe unverändert, kein Eintrag hinzugefügt
+  });
+
+  it('card.finishes leer → jedes Finish wird abgelehnt', () => {
+    const result = addScan(
+      [],
+      scanInput({ finish: 'nonfoil', card: resolvedCard({ finishes: [] }) }),
+      nextId(),
+    );
+
+    expect(result).toEqual({ ok: false, reason: 'invalid_finish', available: [] });
   });
 });
 

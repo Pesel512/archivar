@@ -14,6 +14,7 @@ Fortschritt der Loop-Blöcke aus `LOOP_PROMPT_A.md`. Ein Block pro Lauf, danach 
 - [x] A8 — Scryfall-Client (`packages/scryfall`)
 - [x] A9 — Abschluss
 - [x] A10 — Nacharbeit aus Review (`.loop/REVIEW_A.md`)
+- [x] A11 — Nacharbeit: Finish-Validierung gegen echte Archidekt-Testimport-Erkenntnis
 
 ## Offene Fragen
 
@@ -132,3 +133,39 @@ dort. Es handelt sich nicht mehr um offene Fragen.
   Foil-Symbol, CSV-Werte) reduziert, Testanzahl für `packages/scryfall` auf 26 aktualisiert.
   `pnpm lint`, `pnpm typecheck`, `pnpm test` grün (131 Tests, +3 gegenüber A9), `core`-Coverage
   unverändert 100 %/98,93 % Stmt/Branch.
+- 2026-09-16: A11 abgeschlossen — Nacharbeit nach echtem Archidekt-Testimport-Fund: Archidekt
+  prüft das CSV-Feld „Finish“ gegen die tatsächlich existierenden Finishes der Druckversion und
+  setzt bei Abweichung stillschweigend den Standardwert („Forcing card finish to default,
+  non-matching finish ... does not exist on card“).
+  1. **Diagnose** (`curl` gegen die echte Scryfall-API): `dmr/457` (Counterspell) hat
+     `finishes: ['foil']` — das Skript hatte dafür aber `nonfoil` angefordert, exakt der
+     gefundene Fehler. `acr/262` (Sword of Light and Shadow) hat `finishes: ['etched']` und war
+     bereits korrekt. Ersatz für die deutsche Zeile gesucht und gefunden: `cmm/81`
+     (Counterspell/„Gegenzauber“, deutsche Druckfassung vorhanden) mit
+     `finishes: ['nonfoil', 'foil']`.
+  2. `ResolvedCard` um `finishes: Finish[]` erweitert (`core/types.ts`). `mapping.ts` übernimmt
+     das Scryfall-Feld `finishes`, unbekannte Werte werden gefiltert (`mapFinishes`). Neue
+     Testdatei `packages/scryfall/src/mapping.test.ts` (5 Tests: bekannte Werte übernommen,
+     einzelne Finish, unbekannte Werte verworfen, leere Liste, restliche Felder unverändert).
+     Bestehende `ResolvedCard`-Testfixtures (`csv.test.ts`, `merge.test.ts`, `stability.test.ts`,
+     `client.test.ts`) um `finishes` ergänzt.
+  3. Neue reine Funktion `resolveFinish(requested, available)` in `core/resolve-finish.ts`:
+     verfügbar → `{ok:true, finish:requested, adjusted:false}`; nicht verfügbar mit genau einer
+     Alternative → `{ok:true, finish:<Alternative>, adjusted:true}`; nicht verfügbar mit
+     mehreren oder keiner Alternative → `{ok:false, available}`. 4 Tests, alle vier Fälle.
+  4. `addScan` in `core/merge.ts` liefert jetzt `AddScanResult` (`{ok:true, entries}` oder
+     `{ok:false, reason:'invalid_finish', available}`) statt direkt `CollectionEntry[]`; ein
+     Finish, das nicht in `scan.card.finishes` enthalten ist, wird gar nicht erst übernommen
+     (auch bei leerem `finishes`-Array). Alle bestehenden `addScan`-Tests auf das neue
+     Ergebnisformat umgestellt (Helper `expectOk`), zwei neue Tests für den Ablehnungsfall
+     (ungültiges Finish, leeres `finishes`-Array). 15 Tests gesamt für `merge.ts` (+2).
+  5. `scripts/test-export.ts`: deutsche Zeile von `dmr/457` auf `cmm/81` umgestellt (Etched-Zeile
+     `acr/262` blieb unverändert, da bereits korrekt). Jede Zeile wird vor dem Export mit
+     `resolveFinish` gegen `result.card.finishes` geprüft; bei `ok:false` bricht das Skript mit
+     einer Fehlermeldung ab, die die tatsächlich verfügbaren Finishes nennt. Skript erneut
+     ausgeführt (`pnpm build` → `node scripts/test-export.ts`): alle vier Prüfungen bestanden
+     ohne Anpassung, neue `test-import.csv` erzeugt und inhaltlich verifiziert (Zeile 4 jetzt
+     `Counterspell,CMM,81,...,Normal,German,Lightly Played,Test`).
+  `pnpm lint`, `pnpm typecheck`, `pnpm test` grün (142 Tests, +11 gegenüber A10), `core`-Coverage
+  100 % Statements/Lines, 98,96 % Branches (neue Datei `resolve-finish.ts` 100 %/100 %). Keine
+  offenen Fragen.
