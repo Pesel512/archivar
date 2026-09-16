@@ -20,3 +20,7 @@ Chronologische Notizen zu Entscheidungen, Abweichungen und Nacharbeiten während
   TextEncoder/Buffer implementiert, um `core` plattformneutral zu halten.
 - A7: Set-Vorschlag (`core/set-suggest.ts`) inkl. aller Pflicht-Testfälle. Keine Abweichungen
   vom Prompt.
+- A8: Scryfall-Client (`packages/scryfall`) inkl. aller Pflicht-Testfälle. `composite: true`
+  aus beiden Paket-tsconfigs entfernt (brach tsups DTS-Bundler bei mehrdateiigen Paketen,
+  TS6307); Root-`typecheck`/`build` bauen `core` seitdem explizit zuerst. Zwei Annahmen
+  (Backoff-Basiswert, User-Agent) mit `// VERIFY:` markiert.

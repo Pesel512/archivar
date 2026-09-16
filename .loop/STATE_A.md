@@ -11,7 +11,7 @@ Fortschritt der Loop-Blöcke aus `LOOP_PROMPT_A.md`. Ein Block pro Lauf, danach 
 - [x] A5 — Merge (`core/merge.ts`)
 - [x] A6 — CSV-Export (`core/csv.ts`)
 - [x] A7 — Set-Vorschlag (`core/set-suggest.ts`)
-- [ ] A8 — Scryfall-Client (`packages/scryfall`)
+- [x] A8 — Scryfall-Client (`packages/scryfall`)
 - [ ] A9 — Abschluss
 
 ## Offene Fragen
@@ -64,6 +64,11 @@ Fortschritt der Loop-Blöcke aus `LOOP_PROMPT_A.md`. Ein Block pro Lauf, danach 
   (`;`) sind Annahmen (typische Archidekt-Bezeichnungen), nicht per echtem Import verifiziert.
   Laut Prompt bewusst nur dort anzupassen, wo ein Testimport Abweichungen zeigt. `// VERIFY:`
   im Code.
+- `packages/scryfall/src/client.ts`: Backoff-Basiswert (1000 ms, Verdopplung je Versuch) für
+  429-Antworten ist nicht von Scryfall dokumentiert und wurde angenommen. An echtem
+  Rate-Limiting-Verhalten prüfen. `// VERIFY:` im Code.
+- `packages/scryfall/src/client.ts`: finaler `User-Agent`-String (Kontaktadresse/Version) ist
+  ein Platzhalter, muss vor Produktivbetrieb final festgelegt werden. `// VERIFY:` im Code.
 - 2026-09-16: A5 abgeschlossen. `core/merge.ts` mit `mergeKey`, `addScan`, `markExported`,
   `pendingExport` angelegt. Merge nur in nicht exportierte Einträge (exportierter Treffer erzeugt
   neuen Eintrag statt Änderung), Tag-Vereinigung ohne Duplikate mit stabiler Reihenfolge, alle
@@ -84,3 +89,17 @@ Fortschritt der Loop-Blöcke aus `LOOP_PROMPT_A.md`. Ein Block pro Lauf, danach 
   dasselbe Set haben (Fenster über die letzten N, nicht die gesamte Historie seit Ablehnung).
   9 neue Tests inkl. aller Pflichtfälle, `core`-Coverage gesamt 100 % Statements/Lines, 98,9 %
   Branches; `set-suggest.ts` selbst 100 %/100 %. Keine offenen Fragen.
+- 2026-09-16: A8 abgeschlossen. `packages/scryfall` mit `createScryfallClient`
+  (`getCardBySetNumber`, `getCardByName`, `getPhysicalSets`) und der reinen Funktion
+  `searchSets` implementiert: serielle Request-Queue mit `minIntervalMs`-Abstand, 429 →
+  exponentieller Backoff (max. 3 Versuche) → `rate_limited`, 404 als `Result` statt Exception,
+  Sprach-Fallback bei `getCardBySetNumber` mit `languageFallback: true`, In-Memory-Cache für
+  `getPhysicalSets` (digital-Filter + Sortierung gecacht, `excludeSetTypes` wird erst danach
+  angewandt). Alle `now`/`sleep`/`fetch` injiziert, keine echten Netzwerkaufrufe in Tests.
+  23 neue Tests (19 Client + 4 `searchSets`) decken alle Pflichtfälle ab. Build-Reihenfolge
+  korrigiert: `composite: true` störte tsups DTS-Bundler (TS6307) und wurde aus beiden
+  Paketen entfernt; Root-`typecheck`/`build`-Skripte bauen `core` jetzt explizit vor dem
+  restlichen Workspace, da `scryfall` `@pesel512/archivar-core` real (über `dist/`) aus
+  `node_modules` auflöst — zur Laufzeit unkritisch, da alle Importe aus `core` als
+  `import type` vollständig wegoptimiert werden. Zwei `// VERIFY:`-Annahmen (Backoff-Basiswert,
+  User-Agent-String) unter „Offene Fragen“ ergänzt.

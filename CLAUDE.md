@@ -25,6 +25,11 @@ Monorepo für einen Kartenscanner (Magic: The Gathering). pnpm-Workspace, TypeSc
   `// VERIFY:` markiert und in `ITERATION_A.md` gesammelt.
 - Keine echten Netzwerkaufrufe in Tests — `fetch` wird immer gemockt.
 - Build je Paket über `tsup` (ESM + `.d.ts`).
+- Abhängige Pakete importieren Typen aus `@pesel512/archivar-core` ausschließlich per
+  `import type` (Laufzeit-Import wird vollständig wegoptimiert). Die Root-Skripte `typecheck`
+  und `build` bauen `core` deshalb explizit zuerst, da TypeScript dessen `dist/` für die
+  Typprüfung braucht. Kein `composite: true` in den Paket-`tsconfig.json`s — das bricht tsups
+  DTS-Bundler (TS6307) bei mehrdateiigen Paketen.
 
 ## Befehle
 
