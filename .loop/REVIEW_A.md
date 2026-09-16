@@ -169,16 +169,15 @@ Listenzeile ist veraltet:
 
 ## Priorisierte Nacharbeiten
 
-1. **Niedrig:** `CLAUDE.md:29-30` präzisieren — entweder den `build`-Root-Script-Text explizit
-   um `pnpm --filter @pesel512/archivar-core run build &&` ergänzen (dann stimmt die Aussage
-   „explizit"), oder den CLAUDE.md-Satz auf „`typecheck` baut `core` explizit zuerst; `build`
-   verlässt sich auf pnpms topologische Reihenfolge" umformulieren. Rein kosmetisch, keine
-   Funktionsauswirkung.
-2. **Sehr niedrig / optional:** lokale Variable `window` in
-   `packages/core/src/set-suggest.ts:29` umbenennen (z. B. `windowCodes`), um jede Verwechslung
-   mit dem Browser-Global auszuschließen — funktional unbedenklich, da `core` ohnehin ohne
-   DOM-lib kompiliert und der Name nur eine lokale Konstante ist, aber im Sinne der
-   Paketgrenzen-Konvention klarer benennbar.
+1. **Niedrig — erledigt.** `package.json:9` (`build`-Skript) baut `@pesel512/archivar-core`
+   jetzt per `pnpm --filter @pesel512/archivar-core run build &&` explizit vor, analog zu
+   `typecheck`. Die Aussage in `CLAUDE.md:29-30` stimmt damit. Verifiziert: `pnpm lint`,
+   `pnpm typecheck`, `pnpm test` und `pnpm build` (von sauberem Zustand, `dist/` vorher
+   gelöscht) laufen grün.
+2. **Sehr niedrig / optional — erledigt.** Lokale Konstante in
+   `packages/core/src/set-suggest.ts` von `window` in `windowCodes` umbenannt (Zeile 29-31),
+   um jede Verwechslung mit dem Browser-Global auszuschließen. Verifiziert: `pnpm lint`,
+   `pnpm typecheck`, `pnpm test` laufen grün.
 
 Keine weiteren Nacharbeiten identifiziert. Iteration A erfüllt alle Akzeptanzkriterien aus
 `LOOP_PROMPT_A.md` unverändert.

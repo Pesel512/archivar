@@ -26,7 +26,7 @@ export function getSetSuggestion(
   const sinceDismiss = input.confirmedSetCodes.slice(input.dismissedAtCount);
   if (sinceDismiss.length < cfg.repeatAfterDismiss) return null;
 
-  const window = sinceDismiss.slice(-cfg.repeatAfterDismiss);
-  const candidate = window[0]!;
-  return window.every((code) => code === candidate) ? candidate : null;
+  const windowCodes = sinceDismiss.slice(-cfg.repeatAfterDismiss);
+  const candidate = windowCodes[0]!;
+  return windowCodes.every((code) => code === candidate) ? candidate : null;
 }
