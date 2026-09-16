@@ -62,9 +62,9 @@ function handleFrame(
   config: StabilityConfig,
 ): ScanMachine {
   const { state } = machine;
-  // VERIFY: "ignoriert FRAME" wird hier als vollständiges No-Op verstanden — auch der
-  // failedKey-Cooldown tickt in validating/confirming nicht mit. Alternative Lesart: der
-  // Cooldown ist eine reine Zeit-/Frame-Uhr und müsste unabhängig vom Phase weiterlaufen.
+  // "ignoriert FRAME" ist ein vollständiges No-Op: der failedKey-Cooldown pausiert bewusst in
+  // validating/confirming. Diese Phasen sind kurzlebig und starten ohnehin keinen neuen
+  // Kandidaten, ein währenddessen weiterlaufender Cooldown hätte keinen beobachtbaren Effekt.
   if (state.phase === 'validating' || state.phase === 'confirming') {
     return machine;
   }

@@ -3,13 +3,13 @@ import { createMemoryCache } from './memory-cache.js';
 import { mapCard, type RawScryfallCard } from './mapping.js';
 import { createRequestQueue } from './queue.js';
 import type { PhysicalSet } from './sets.js';
-import type { Cache, LookupResult, ScryfallClientOptions } from './types.js';
+import type { Cache, LookupResult, ScryfallClientOptions, SetsResult } from './types.js';
 
 const BASE_URL = 'https://api.scryfall.com';
 const DEFAULT_MIN_INTERVAL_MS = 100;
 const MAX_ATTEMPTS = 3;
-// VERIFY: Scryfall dokumentiert kein festes Backoff-Schema für 429 — Basiswert 1s,
-// je Versuch verdoppelt. An echtem Rate-Limiting-Verhalten prüfen.
+// Fallback-Backoff, falls eine 429-Antwort keinen (numerischen) Retry-After-Header liefert:
+// Basiswert 1s, je Versuch verdoppelt. Liefert Scryfall Retry-After, hat der Vorrang.
 const BACKOFF_BASE_MS = 1000;
 
 interface RawScryfallSet {
@@ -32,7 +32,7 @@ type FetchOutcome =
 export interface ScryfallClient {
   getCardBySetNumber(set: string, number: string, lang?: LanguageCode): Promise<LookupResult>;
   getCardByName(name: string, set?: string): Promise<LookupResult>;
-  getPhysicalSets(opts?: { excludeSetTypes?: string[] }): Promise<PhysicalSet[]>;
+  getPhysicalSets(opts?: { excludeSetTypes?: string[] }): Promise<SetsResult>;
 }
 
 function isBrowser(): boolean {
@@ -42,8 +42,7 @@ function isBrowser(): boolean {
 function buildHeaders(custom: Record<string, string> | undefined): Record<string, string> {
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (!isBrowser()) {
-    // VERIFY: finaler User-Agent-String (Kontaktadresse/Version) noch nicht festgelegt.
-    headers['User-Agent'] = 'archivar-scryfall-client/0.1';
+    headers['User-Agent'] = 'archivar/0.1 (+https://github.com/Pesel512/archivar)';
   }
   return { ...headers, ...custom };
 }
@@ -65,6 +64,15 @@ function buildNamedUrl(name: string, set: string | undefined): string {
   return `${BASE_URL}/cards/named?${params.join('&')}`;
 }
 
+// Retry-After nur in der numerischen Sekunden-Form unterstützt (HTTP erlaubt auch ein
+// Datum, das Scryfall aber nicht verwendet).
+function parseRetryAfterMs(headerValue: string | null): number | null {
+  if (headerValue === null) return null;
+  const seconds = Number(headerValue);
+  if (!Number.isFinite(seconds) || seconds < 0) return null;
+  return seconds * 1000;
+}
+
 async function fetchWithRetry(
   fetchImpl: typeof fetch,
   url: string,
@@ -81,7 +89,8 @@ async function fetchWithRetry(
     }
     if (response.status === 429) {
       if (attempt >= MAX_ATTEMPTS) return { kind: 'rate_limited' };
-      await sleep(delay);
+      const retryAfterMs = parseRetryAfterMs(response.headers.get('Retry-After'));
+      await sleep(retryAfterMs ?? delay);
       delay *= 2;
       continue;
     }
@@ -146,7 +155,7 @@ export function createScryfallClient(options: ScryfallClientOptions): ScryfallCl
       : { ok: false, reason: 'network' };
   }
 
-  async function getPhysicalSets(opts?: { excludeSetTypes?: string[] }): Promise<PhysicalSet[]> {
+  async function getPhysicalSets(opts?: { excludeSetTypes?: string[] }): Promise<SetsResult> {
     const cacheKey = 'physical-sets';
     const cached = cache.get(cacheKey) as PhysicalSet[] | undefined;
     let sets: PhysicalSet[];
@@ -155,11 +164,9 @@ export function createScryfallClient(options: ScryfallClientOptions): ScryfallCl
       sets = cached;
     } else {
       const outcome = await request(`${BASE_URL}/sets`);
-      if (outcome.kind !== 'status' || outcome.status !== 200) {
-        // VERIFY: kein Result-Typ für die Set-Liste spezifiziert — Fehlerfall liefert
-        // bewusst eine leere Liste statt einer Exception.
-        return [];
-      }
+      if (outcome.kind === 'network') return { ok: false, reason: 'network' };
+      if (outcome.kind === 'rate_limited') return { ok: false, reason: 'rate_limited' };
+      if (outcome.status !== 200) return { ok: false, reason: 'network' };
       const raw = (await outcome.json()) as RawScryfallSetList;
       const physical = raw.data
         .filter((set) => !set.digital)
@@ -173,9 +180,9 @@ export function createScryfallClient(options: ScryfallClientOptions): ScryfallCl
       cache.set(cacheKey, sets);
     }
 
-    if (!opts?.excludeSetTypes || opts.excludeSetTypes.length === 0) return sets;
+    if (!opts?.excludeSetTypes || opts.excludeSetTypes.length === 0) return { ok: true, sets };
     const excluded = new Set(opts.excludeSetTypes);
-    return sets.filter((set) => !excluded.has(set.setType));
+    return { ok: true, sets: sets.filter((set) => !excluded.has(set.setType)) };
   }
 
   return { getCardBySetNumber, getCardByName, getPhysicalSets };

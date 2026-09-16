@@ -33,8 +33,9 @@ Stand nach A8 (`pnpm test:coverage`, Schwelle 90 % für `core`):
 | `types.ts` | 100 % | 100 % | 100 % | 100 % |
 
 `packages/scryfall` unterliegt keiner Coverage-Schwelle (nur für `core` gefordert), ist aber
-mit 23 Tests entlang aller Pflicht-Testfälle abgedeckt (Vitest-Report bei Bedarf lokal per
-`pnpm test:coverage` einsehbar, Konfiguration in `vitest.config.ts` misst aktuell nur `core`).
+mit 26 Tests (Stand nach A10) entlang aller Pflicht-Testfälle abgedeckt (Vitest-Report bei
+Bedarf lokal per `pnpm test:coverage` einsehbar, Konfiguration in `vitest.config.ts` misst
+aktuell nur `core`).
 
 Verbleibende ungetestete Branches in `core` sind durchweg durch `noUncheckedIndexedAccess`
 erzwungene, durch die jeweilige Konstruktion praktisch unerreichbare Absicherungen (z. B.
@@ -46,18 +47,23 @@ erzwungene, durch die jeweilige Konstruktion praktisch unerreichbare Absicherung
 |---|---|
 | `packages/core/src/corner-parser.ts:12` | Sprachcode-Tabelle (`LANGUAGE_CODE_TABLE`): CS→zhs, CT→zht, JP/JA→ja — aus Scryfall-Doku übernommen, nicht an echten Kartenscans verifiziert. |
 | `packages/core/src/corner-parser.ts:106` | Foil-Hinweis-Symbole: `★`/`*` → Foil, `•`/`·`/`.` → kein Foil, sonst `null` — Symbolik variiert je Set/Druckjahr, an echten Karten zu prüfen. |
-| `packages/core/src/stability.ts:65` | "`validating`/`confirming` ignorieren `FRAME`" als vollständiges No-Op interpretiert — der `failedKey`-Cooldown zählt in diesen Phasen nicht weiter. Alternative Lesart wäre eine reine Frame-Uhr, die auch dann tickt. |
 | `packages/core/src/csv.ts:25` | `DEFAULT_CSV_VALUE_MAP` (Finish/Sprache/Zustand/Tag-Separator): typische Archidekt-Bezeichnungen angenommen, nicht per echtem Import verifiziert. |
-| `packages/scryfall/src/client.ts:11` | Backoff-Basiswert bei 429 (1000 ms, Verdopplung je Versuch) — von Scryfall nicht dokumentiert. |
-| `packages/scryfall/src/client.ts:45` | `User-Agent`-String ist ein Platzhalter, vor Produktivbetrieb final festzulegen. |
-| `packages/scryfall/src/client.ts:159` | `getPhysicalSets` hat keinen spezifizierten Result-Typ; Fehlerfall liefert bewusst eine leere Liste statt einer Exception. |
+
+Vier ursprünglich hier gelistete Annahmen wurden in Block A10 (Nacharbeit nach Review)
+aufgelöst und sind daher keine offenen `// VERIFY:`-Stellen mehr: die Cooldown-Semantik in
+`stability.ts` (Verhalten bestätigt, nur als begründeter Kommentar dokumentiert), der
+429-Backoff in `packages/scryfall/src/client.ts` (nutzt jetzt den `Retry-After`-Header, wenn
+vorhanden), der `User-Agent`-String (fest auf
+`archivar/0.1 (+https://github.com/Pesel512/archivar)` gesetzt) und `getPhysicalSets` (liefert
+jetzt einen `SetsResult`-Typ statt einer leeren Liste im Fehlerfall). Details siehe
+`.loop/STATE_A.md`, Block A10.
 
 ## Offene Fragen
 
-Siehe `.loop/STATE_A.md`, Abschnitt „Offene Fragen“ — deckt sich mit der Annahmen-Liste oben.
-Keine der Annahmen blockiert den Abschluss von Iteration A; alle sind konfigurierbar bzw. an
-einer einzigen Stelle im Code anpassbar, sobald echte Kartenscans oder ein Testimport bei
-Archidekt/Scryfall Abweichungen zeigen.
+Die drei verbleibenden Annahmen oben (Sprachcodes, Foil-Symbol, CSV-Werte) sind die einzigen
+noch offenen Fragen aus Iteration A. Keine blockiert den Abschluss; alle sind konfigurierbar
+bzw. an einer einzigen Stelle im Code anpassbar, sobald echte Kartenscans oder ein Testimport
+bei Archidekt Abweichungen zeigen.
 
 ## Akzeptanzkriterien Iteration A
 

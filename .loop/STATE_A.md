@@ -13,6 +13,7 @@ Fortschritt der Loop-Blöcke aus `LOOP_PROMPT_A.md`. Ein Block pro Lauf, danach 
 - [x] A7 — Set-Vorschlag (`core/set-suggest.ts`)
 - [x] A8 — Scryfall-Client (`packages/scryfall`)
 - [x] A9 — Abschluss
+- [x] A10 — Nacharbeit aus Review (`.loop/REVIEW_A.md`)
 
 ## Offene Fragen
 
@@ -22,23 +23,14 @@ Fortschritt der Loop-Blöcke aus `LOOP_PROMPT_A.md`. Ein Block pro Lauf, danach 
 - Foil-Hinweis-Symbole (`corner-parser.ts`, `resolveFoilHint`): `★`/`*` → Foil, `•`/`·`/`.` → kein
   Foil, sonst `null`. Angenommen: Symbolik variiert je Set/Druckjahr und muss an echten Karten
   geprüft werden. `// VERIFY:` im Code.
-- `stability.ts`, `handleFrame`: "validating/confirming ignorieren FRAME" wird als vollständiges
-  No-Op interpretiert — der `failedKey`-Cooldown zählt in diesen Phasen nicht weiter. Alternative
-  Lesart wäre eine reine Frame-Uhr, die auch dann tickt. Mit Default-Config kaum beobachtbar
-  (validating/confirming sind kurzlebig), könnte bei sehr langsamer Scryfall-Antwort relevant
-  werden. `// VERIFY:` im Code.
 - `csv.ts`, `DEFAULT_CSV_VALUE_MAP`: alle Finish-/Sprache-/Zustand-Werte sowie der Tag-Separator
   (`;`) sind Annahmen (typische Archidekt-Bezeichnungen), nicht per echtem Import verifiziert.
   Laut Prompt bewusst nur dort anzupassen, wo ein Testimport Abweichungen zeigt. `// VERIFY:`
   im Code.
-- `packages/scryfall/src/client.ts`: Backoff-Basiswert (1000 ms, Verdopplung je Versuch) für
-  429-Antworten ist nicht von Scryfall dokumentiert und wurde angenommen. An echtem
-  Rate-Limiting-Verhalten prüfen. `// VERIFY:` im Code.
-- `packages/scryfall/src/client.ts`: finaler `User-Agent`-String (Kontaktadresse/Version) ist
-  ein Platzhalter, muss vor Produktivbetrieb final festgelegt werden. `// VERIFY:` im Code.
-- `packages/scryfall/src/client.ts`, `getPhysicalSets`: kein spezifizierter Result-Typ für die
-  Set-Liste — Fehlerfall liefert bewusst eine leere Liste statt einer Exception. `// VERIFY:`
-  im Code.
+
+Vier ursprünglich hier gelistete Punkte (Cooldown-Semantik `stability.ts`, Backoff-Basiswert,
+`User-Agent`, `getPhysicalSets`-Rückgabetyp) wurden in Block A10 aufgelöst, siehe Log-Eintrag
+dort. Es handelt sich nicht mehr um offene Fragen.
 
 ## Log
 
@@ -114,3 +106,29 @@ Fortschritt der Loop-Blöcke aus `LOOP_PROMPT_A.md`. Ein Block pro Lauf, danach 
   einen Editier-Fehler versehentlich im Log- statt im Fragen-Abschnitt gelandet und wurden an
   die richtige Stelle verschoben; inhaltlich unverändert. Vollständiger Check von sauberem
   Zustand aus (`rm -rf dist` → `pnpm lint && pnpm typecheck && pnpm test`) grün.
+- 2026-09-16: A10 abgeschlossen — Nacharbeit aus `.loop/REVIEW_A.md`, vier `// VERIFY:`-Stellen
+  aufgelöst statt nur dokumentiert:
+  1. `stability.ts:65` — Verhalten unverändert (Cooldown pausiert weiterhin in
+     validating/confirming), `// VERIFY:` durch einen begründenden Kommentar ersetzt: die
+     Phasen sind kurzlebig und starten ohnehin keinen neuen Kandidaten, ein weiterlaufender
+     Cooldown hätte keinen beobachtbaren Effekt.
+  2. `client.ts` — `fetchWithRetry` liest bei 429 den `Retry-After`-Header (nur numerische
+     Sekunden-Form) und nutzt ihn als Wartezeit; fehlt er, greift weiterhin der bisherige
+     exponentielle Backoff (Basis 1000 ms, Verdopplung). Maximal 3 Versuche unverändert.
+     Zwei neue Tests: „Retry-After-Header wird als Wartezeit verwendet“ und „fehlt der
+     Retry-After-Header, greift das bestehende Backoff“ (letzterer ersetzt den alten
+     „429 → Backoff → Erfolg“-Test, der inhaltlich identisch geworden wäre).
+  3. `client.ts` — `User-Agent` fest auf `archivar/0.1 (+https://github.com/Pesel512/archivar)`
+     gesetzt, kein Platzhalter mehr.
+  4. `client.ts` — `getPhysicalSets` liefert jetzt `SetsResult`
+     (`{ ok: true; sets } | { ok: false; reason: 'rate_limited' | 'network' }`) statt einer
+     leeren Liste im Fehlerfall; Fehlschläge werden weiterhin nicht gecacht (Cache-`set()` nur
+     im Erfolgspfad, unverändert). Neuer Typ `SetsResult` in `types.ts` exportiert, `PhysicalSet`
+     dafür importiert. Drei neue/angepasste Tests: „liefert ok:false bei unerwartetem
+     Statuscode“, „liefert ok:false mit reason rate_limited“, „nach einem Fehlschlag löst der
+     nächste Aufruf eine neue Anfrage aus“; die beiden bestehenden Sets-Tests auf das
+     `{ ok, sets }`-Ergebnis umgestellt.
+  `ITERATION_A.md` „Bewusste Annahmen“ auf die drei verbleibenden Punkte (Sprachcodes,
+  Foil-Symbol, CSV-Werte) reduziert, Testanzahl für `packages/scryfall` auf 26 aktualisiert.
+  `pnpm lint`, `pnpm typecheck`, `pnpm test` grün (131 Tests, +3 gegenüber A9), `core`-Coverage
+  unverändert 100 %/98,93 % Stmt/Branch.

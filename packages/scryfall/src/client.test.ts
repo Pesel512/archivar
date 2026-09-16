@@ -4,6 +4,7 @@ import { createScryfallClient } from './client.js';
 interface MockResponse {
   status: number;
   body?: unknown;
+  headers?: Record<string, string>;
 }
 
 interface FakeCall {
@@ -19,9 +20,11 @@ function createFakeFetch(responses: MockResponse[]) {
     const response = responses[index];
     index += 1;
     if (!response) throw new Error('Keine weitere gemockte Antwort vorhanden');
+    const responseHeaders = response.headers ?? {};
     return {
       status: response.status,
       json: async () => response.body,
+      headers: { get: (name: string) => responseHeaders[name] ?? null },
     } as Response;
   }) as typeof fetch;
   return { fetchImpl, calls };
@@ -219,7 +222,22 @@ describe('createScryfallClient — Serialisierung & Rate-Limiting', () => {
     expect(timestamps[1]! - timestamps[0]!).toBeGreaterThanOrEqual(100);
   });
 
-  it('429 → Backoff → Erfolg', async () => {
+  it('Retry-After-Header wird als Wartezeit verwendet, statt des Backoffs', async () => {
+    const { fetchImpl, calls } = createFakeFetch([
+      { status: 429, headers: { 'Retry-After': '2' } },
+      { status: 200, body: rawCard() },
+    ]);
+    const clock = createFakeClock();
+    const client = createScryfallClient({ fetch: fetchImpl, now: clock.now, sleep: clock.sleep });
+
+    const result = await client.getCardBySetNumber('DOM', '168');
+
+    expect(result.ok).toBe(true);
+    expect(calls).toHaveLength(2);
+    expect(clock.sleepCalls).toEqual([2000]);
+  });
+
+  it('fehlt der Retry-After-Header, greift das bestehende Backoff', async () => {
     const { fetchImpl, calls } = createFakeFetch([{ status: 429 }, { status: 200, body: rawCard() }]);
     const clock = createFakeClock();
     const client = createScryfallClient({ fetch: fetchImpl, now: clock.now, sleep: clock.sleep });
@@ -323,7 +341,8 @@ describe('createScryfallClient — getPhysicalSets', () => {
 
     const result = await client.getPhysicalSets();
 
-    expect(result.map((s) => s.code)).toEqual(['NEW', 'OLD']);
+    if (!result.ok) throw new Error('expected ok result');
+    expect(result.sets.map((s) => s.code)).toEqual(['NEW', 'OLD']);
   });
 
   it('excludeSetTypes filtert auf dem gecachten Ergebnis, ohne erneut zu laden', async () => {
@@ -344,17 +363,44 @@ describe('createScryfallClient — getPhysicalSets', () => {
     await client.getPhysicalSets();
     const filtered = await client.getPhysicalSets({ excludeSetTypes: ['funny'] });
 
-    expect(filtered.map((s) => s.code)).toEqual(['EXP']);
+    if (!filtered.ok) throw new Error('expected ok result');
+    expect(filtered.sets.map((s) => s.code)).toEqual(['EXP']);
     expect(calls).toHaveLength(1);
   });
 
-  it('liefert eine leere Liste bei unerwartetem Statuscode', async () => {
+  it('liefert ok:false bei unerwartetem Statuscode', async () => {
     const { fetchImpl } = createFakeFetch([{ status: 500 }]);
     const clock = createFakeClock();
     const client = createScryfallClient({ fetch: fetchImpl, now: clock.now, sleep: clock.sleep });
 
     const result = await client.getPhysicalSets();
 
-    expect(result).toEqual([]);
+    expect(result).toEqual({ ok: false, reason: 'network' });
+  });
+
+  it('liefert ok:false mit reason rate_limited, wenn 429 dreimal auftritt', async () => {
+    const { fetchImpl } = createFakeFetch([{ status: 429 }, { status: 429 }, { status: 429 }]);
+    const clock = createFakeClock();
+    const client = createScryfallClient({ fetch: fetchImpl, now: clock.now, sleep: clock.sleep });
+
+    const result = await client.getPhysicalSets();
+
+    expect(result).toEqual({ ok: false, reason: 'rate_limited' });
+  });
+
+  it('nach einem Fehlschlag löst der nächste Aufruf eine neue Anfrage aus (kein Cache für Fehler)', async () => {
+    const { fetchImpl, calls } = createFakeFetch([
+      { status: 500 },
+      { status: 200, body: { data: [rawSet()] } },
+    ]);
+    const clock = createFakeClock();
+    const client = createScryfallClient({ fetch: fetchImpl, now: clock.now, sleep: clock.sleep });
+
+    const first = await client.getPhysicalSets();
+    expect(first).toEqual({ ok: false, reason: 'network' });
+
+    const second = await client.getPhysicalSets();
+    expect(second.ok).toBe(true);
+    expect(calls).toHaveLength(2);
   });
 });

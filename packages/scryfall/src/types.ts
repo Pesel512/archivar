@@ -1,4 +1,5 @@
 import type { ResolvedCard } from '@pesel512/archivar-core';
+import type { PhysicalSet } from './sets.js';
 
 export interface Cache {
   get(key: string): unknown | undefined;
@@ -17,3 +18,7 @@ export interface ScryfallClientOptions {
 export type LookupResult =
   | { ok: true; card: ResolvedCard }
   | { ok: false; reason: 'not_found' | 'rate_limited' | 'network' };
+
+export type SetsResult =
+  | { ok: true; sets: PhysicalSet[] }
+  | { ok: false; reason: 'rate_limited' | 'network' };
