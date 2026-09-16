@@ -13,3 +13,5 @@ Chronologische Notizen zu Entscheidungen, Abweichungen und Nacharbeiten während
   Fragen“.
 - A4: Stabilitäts-Reducer (`core/stability.ts`) mit allen Pflicht-Transitionen und -Sequenzen.
   Eine Annahme zur Cooldown-Semantik während validating/confirming mit `// VERIFY:` markiert.
+- A5: Merge-Logik (`core/merge.ts`) inkl. aller Pflicht-Testfälle. Keine Abweichungen vom
+  Prompt.
