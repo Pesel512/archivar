@@ -7,7 +7,7 @@ Fortschritt der Loop-Blöcke aus `LOOP_PROMPT_A.md`. Ein Block pro Lauf, danach 
 - [x] A1 — Repo-Gerüst
 - [x] A2 — Domänentypen (`core/types.ts`)
 - [x] A3 — Corner-Parser (`core/corner-parser.ts`)
-- [ ] A4 — Stabilitäts-Reducer (`core/stability.ts`)
+- [x] A4 — Stabilitäts-Reducer (`core/stability.ts`)
 - [ ] A5 — Merge (`core/merge.ts`)
 - [ ] A6 — CSV-Export (`core/csv.ts`)
 - [ ] A7 — Set-Vorschlag (`core/set-suggest.ts`)
@@ -22,6 +22,11 @@ Fortschritt der Loop-Blöcke aus `LOOP_PROMPT_A.md`. Ein Block pro Lauf, danach 
 - Foil-Hinweis-Symbole (`corner-parser.ts`, `resolveFoilHint`): `★`/`*` → Foil, `•`/`·`/`.` → kein
   Foil, sonst `null`. Angenommen: Symbolik variiert je Set/Druckjahr und muss an echten Karten
   geprüft werden. `// VERIFY:` im Code.
+- `stability.ts`, `handleFrame`: "validating/confirming ignorieren FRAME" wird als vollständiges
+  No-Op interpretiert — der `failedKey`-Cooldown zählt in diesen Phasen nicht weiter. Alternative
+  Lesart wäre eine reine Frame-Uhr, die auch dann tickt. Mit Default-Config kaum beobachtbar
+  (validating/confirming sind kurzlebig), könnte bei sehr langsamer Scryfall-Antwort relevant
+  werden. `// VERIFY:` im Code.
 
 ## Log
 
@@ -47,3 +52,11 @@ Fortschritt der Loop-Blöcke aus `LOOP_PROMPT_A.md`. Ein Block pro Lauf, danach 
   Statements/Lines, 98,1 % Branches (>90 %-Schwelle) — verbleibende ungetestete Branch ist eine
   durch `noUncheckedIndexedAccess` erzwungene, praktisch unerreichbare Absicherung. Zwei
   `// VERIFY:`-Annahmen (Sprachcode-Tabelle, Foil-Symbole) unter „Offene Fragen“ vermerkt.
+- 2026-09-16: A4 abgeschlossen. `core/stability.ts` mit `scanReducer`, `ScanMachine`,
+  `ScanState`, `ScanAction`, `StabilityConfig`, `DEFAULT_STABILITY_CONFIG`, `createScanMachine`
+  und `enteredValidation` angelegt. Alle Einzeltransitionen sowie alle geforderten Sequenzen
+  (drei gleiche Frames, zwei+ein anderer+zwei, Karte bleibt liegen, Doppelkarten im Stapel,
+  Cooldown-Blockade, SET_CHANGED während validating/confirming, partial zählt nicht) getestet
+  (40 Tests). Coverage `core` gesamt 100 % Statements/Lines, 99,2 % Branches; `stability.ts`
+  selbst 100 %/100 %. Eine `// VERIFY:`-Annahme zur Interpretation von "ignoriert FRAME" (kein
+  Cooldown-Tick in validating/confirming) unter „Offene Fragen“ vermerkt.

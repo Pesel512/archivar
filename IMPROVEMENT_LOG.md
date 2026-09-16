@@ -11,3 +11,5 @@ Chronologische Notizen zu Entscheidungen, Abweichungen und Nacharbeiten während
 - A3: Corner-Parser (`core/corner-parser.ts`) inkl. aller Pflicht-Testfälle. Zwei Annahmen
   (Sprachcode-Tabelle, Foil-Symbole) mit `// VERIFY:` markiert, siehe `STATE_A.md` „Offene
   Fragen“.
+- A4: Stabilitäts-Reducer (`core/stability.ts`) mit allen Pflicht-Transitionen und -Sequenzen.
+  Eine Annahme zur Cooldown-Semantik während validating/confirming mit `// VERIFY:` markiert.
