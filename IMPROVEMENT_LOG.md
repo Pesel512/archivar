@@ -24,3 +24,7 @@ Chronologische Notizen zu Entscheidungen, Abweichungen und Nacharbeiten während
   aus beiden Paket-tsconfigs entfernt (brach tsups DTS-Bundler bei mehrdateiigen Paketen,
   TS6307); Root-`typecheck`/`build` bauen `core` seitdem explizit zuerst. Zwei Annahmen
   (Backoff-Basiswert, User-Agent) mit `// VERIFY:` markiert.
+- A9: Iteration A abgeschlossen. `ITERATION_A.md` (Übersicht, Coverage, alle sieben
+  `// VERIFY:`-Stellen mit Datei:Zeile, Akzeptanzkriterien) und `README.md`
+  (Paketübersicht, Hinweis auf Iteration B am echten Gerät) angelegt. Keine Abweichungen vom
+  Prompt; alle Akzeptanzkriterien aus `LOOP_PROMPT_A.md` erfüllt.

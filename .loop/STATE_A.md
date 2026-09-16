@@ -12,7 +12,7 @@ Fortschritt der Loop-Blöcke aus `LOOP_PROMPT_A.md`. Ein Block pro Lauf, danach 
 - [x] A6 — CSV-Export (`core/csv.ts`)
 - [x] A7 — Set-Vorschlag (`core/set-suggest.ts`)
 - [x] A8 — Scryfall-Client (`packages/scryfall`)
-- [ ] A9 — Abschluss
+- [x] A9 — Abschluss
 
 ## Offene Fragen
 
@@ -27,6 +27,18 @@ Fortschritt der Loop-Blöcke aus `LOOP_PROMPT_A.md`. Ein Block pro Lauf, danach 
   Lesart wäre eine reine Frame-Uhr, die auch dann tickt. Mit Default-Config kaum beobachtbar
   (validating/confirming sind kurzlebig), könnte bei sehr langsamer Scryfall-Antwort relevant
   werden. `// VERIFY:` im Code.
+- `csv.ts`, `DEFAULT_CSV_VALUE_MAP`: alle Finish-/Sprache-/Zustand-Werte sowie der Tag-Separator
+  (`;`) sind Annahmen (typische Archidekt-Bezeichnungen), nicht per echtem Import verifiziert.
+  Laut Prompt bewusst nur dort anzupassen, wo ein Testimport Abweichungen zeigt. `// VERIFY:`
+  im Code.
+- `packages/scryfall/src/client.ts`: Backoff-Basiswert (1000 ms, Verdopplung je Versuch) für
+  429-Antworten ist nicht von Scryfall dokumentiert und wurde angenommen. An echtem
+  Rate-Limiting-Verhalten prüfen. `// VERIFY:` im Code.
+- `packages/scryfall/src/client.ts`: finaler `User-Agent`-String (Kontaktadresse/Version) ist
+  ein Platzhalter, muss vor Produktivbetrieb final festgelegt werden. `// VERIFY:` im Code.
+- `packages/scryfall/src/client.ts`, `getPhysicalSets`: kein spezifizierter Result-Typ für die
+  Set-Liste — Fehlerfall liefert bewusst eine leere Liste statt einer Exception. `// VERIFY:`
+  im Code.
 
 ## Log
 
@@ -60,15 +72,6 @@ Fortschritt der Loop-Blöcke aus `LOOP_PROMPT_A.md`. Ein Block pro Lauf, danach 
   (40 Tests). Coverage `core` gesamt 100 % Statements/Lines, 99,2 % Branches; `stability.ts`
   selbst 100 %/100 %. Eine `// VERIFY:`-Annahme zur Interpretation von "ignoriert FRAME" (kein
   Cooldown-Tick in validating/confirming) unter „Offene Fragen“ vermerkt.
-- `csv.ts`, `DEFAULT_CSV_VALUE_MAP`: alle Finish-/Sprache-/Zustand-Werte sowie der Tag-Separator
-  (`;`) sind Annahmen (typische Archidekt-Bezeichnungen), nicht per echtem Import verifiziert.
-  Laut Prompt bewusst nur dort anzupassen, wo ein Testimport Abweichungen zeigt. `// VERIFY:`
-  im Code.
-- `packages/scryfall/src/client.ts`: Backoff-Basiswert (1000 ms, Verdopplung je Versuch) für
-  429-Antworten ist nicht von Scryfall dokumentiert und wurde angenommen. An echtem
-  Rate-Limiting-Verhalten prüfen. `// VERIFY:` im Code.
-- `packages/scryfall/src/client.ts`: finaler `User-Agent`-String (Kontaktadresse/Version) ist
-  ein Platzhalter, muss vor Produktivbetrieb final festgelegt werden. `// VERIFY:` im Code.
 - 2026-09-16: A5 abgeschlossen. `core/merge.ts` mit `mergeKey`, `addScan`, `markExported`,
   `pendingExport` angelegt. Merge nur in nicht exportierte Einträge (exportierter Treffer erzeugt
   neuen Eintrag statt Änderung), Tag-Vereinigung ohne Duplikate mit stabiler Reihenfolge, alle
@@ -103,3 +106,11 @@ Fortschritt der Loop-Blöcke aus `LOOP_PROMPT_A.md`. Ein Block pro Lauf, danach 
   `node_modules` auflöst — zur Laufzeit unkritisch, da alle Importe aus `core` als
   `import type` vollständig wegoptimiert werden. Zwei `// VERIFY:`-Annahmen (Backoff-Basiswert,
   User-Agent-String) unter „Offene Fragen“ ergänzt.
+- 2026-09-16: A9 abgeschlossen — Iteration A fertig. `ITERATION_A.md` (Übersicht aller Blöcke,
+  Coverage-Tabelle, alle sieben `// VERIFY:`-Stellen mit Datei:Zeile, Akzeptanzkriterien
+  abgehakt) und `README.md` (Paketübersicht, Hinweis auf Iteration B am echten Gerät) angelegt,
+  `IMPROVEMENT_LOG.md` um A9-Eintrag ergänzt. Bei dieser Gelegenheit auch die „Offene
+  Fragen“-Liste hier bereinigt: drei Annahmen (csv.ts, client.ts Backoff/User-Agent) waren durch
+  einen Editier-Fehler versehentlich im Log- statt im Fragen-Abschnitt gelandet und wurden an
+  die richtige Stelle verschoben; inhaltlich unverändert. Vollständiger Check von sauberem
+  Zustand aus (`rm -rf dist` → `pnpm lint && pnpm typecheck && pnpm test`) grün.
