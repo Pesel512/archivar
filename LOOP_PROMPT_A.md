@@ -5,6 +5,7 @@ Du arbeitest im Repo `archivar`. Ziel von Iteration A ist die komplette **reine 
 ## Arbeitsweise (verbindlich)
 
 0. **Erster Lauf:** Existiert `.loop/STATE_A.md` noch nicht, ist das Repo leer — beginne mit A1 und lege die Datei dort an.
+0b. **Wiederaufnahme:** Prüfe vor allem anderen `git status`. Gibt es uncommittete Änderungen, wurde ein Block unterbrochen (z. B. durch einen Codespace-Stopp). Ordne die Änderungen dem ersten offenen Block zu, prüfe sie auf Vollständigkeit und setze diesen Block fort — nicht verwerfen, nicht neu beginnen. Vermerke die Unterbrechung im Log von `STATE_A.md`.
 1. Lies zuerst `CLAUDE.md` (ab A1 vorhanden) und `.loop/STATE_A.md`.
 2. Bearbeite **genau einen** offenen Block — den ersten, der in `STATE_A.md` nicht abgehakt ist.
 3. Nach dem Block: `pnpm lint && pnpm typecheck && pnpm test` müssen grün sein.
