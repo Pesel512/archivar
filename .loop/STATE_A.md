@@ -5,7 +5,7 @@ Fortschritt der Loop-Blöcke aus `LOOP_PROMPT_A.md`. Ein Block pro Lauf, danach 
 ## Blöcke
 
 - [x] A1 — Repo-Gerüst
-- [ ] A2 — Domänentypen (`core/types.ts`)
+- [x] A2 — Domänentypen (`core/types.ts`)
 - [ ] A3 — Corner-Parser (`core/corner-parser.ts`)
 - [ ] A4 — Stabilitäts-Reducer (`core/stability.ts`)
 - [ ] A5 — Merge (`core/merge.ts`)
@@ -26,3 +26,9 @@ _(keine)_
   (lint/typecheck/test) unter `.github/workflows/ci.yml`, `CLAUDE.md` mit Konventionen angelegt.
   `core/tsconfig.json` ohne `"DOM"` in `lib` — Referenz auf `document` in `core` schlägt beim
   Typecheck fehl (manuell verifiziert, nicht im Code belassen).
+- 2026-09-16: A2 abgeschlossen. `core/types.ts` mit allen Domänentypen (`Finish`, `Condition`,
+  `LanguageCode`, `Rarity`, `CornerReading`, `ReadingKey`, `ResolvedCard`, `CollectionEntry`) und
+  `toReadingKey` angelegt, `index.ts` re-exportiert das Modul. Tests für `toReadingKey`
+  (Großschreibung, Normalisierung, Buchstabensuffix bleibt erhalten). Coverage 100 % für `core`.
+  `vitest.config.ts` angepasst: reine Re-Export-Barrel (`index.ts`) aus der Coverage-Messung
+  ausgeschlossen, da sie sonst fälschlich als ungetestet zählt.
