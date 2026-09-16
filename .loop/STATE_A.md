@@ -10,7 +10,7 @@ Fortschritt der Loop-Blöcke aus `LOOP_PROMPT_A.md`. Ein Block pro Lauf, danach 
 - [x] A4 — Stabilitäts-Reducer (`core/stability.ts`)
 - [x] A5 — Merge (`core/merge.ts`)
 - [x] A6 — CSV-Export (`core/csv.ts`)
-- [ ] A7 — Set-Vorschlag (`core/set-suggest.ts`)
+- [x] A7 — Set-Vorschlag (`core/set-suggest.ts`)
 - [ ] A8 — Scryfall-Client (`packages/scryfall`)
 - [ ] A9 — Abschluss
 
@@ -77,3 +77,10 @@ Fortschritt der Loop-Blöcke aus `LOOP_PROMPT_A.md`. Ein Block pro Lauf, danach 
   bei jedem Typecheck), Byte-basierte Dateiaufteilung ohne Zeilenteilung. 13 neue Tests, `core`-
   Coverage gesamt 100 % Statements/Lines, 98,9 % Branches; `csv.ts` selbst 100 %/97,1 %. Eine
   `// VERIFY:`-Sammel-Annahme (alle Archidekt-Wertetabellen) unter „Offene Fragen“ ergänzt.
+- 2026-09-16: A7 abgeschlossen. `core/set-suggest.ts` mit `getSetSuggestion`, `SuggestConfig`,
+  `SuggestInput`, `DEFAULT_SUGGEST_CONFIG` angelegt: kein Vorschlag bei `fixedSet` oder leerer
+  Historie, Vorschlag der ersten bestätigten Karte solange nicht abgelehnt wurde, nach Ablehnung
+  Vorschlag erst wieder, wenn die letzten `repeatAfterDismiss` Karten seit der Ablehnung
+  dasselbe Set haben (Fenster über die letzten N, nicht die gesamte Historie seit Ablehnung).
+  9 neue Tests inkl. aller Pflichtfälle, `core`-Coverage gesamt 100 % Statements/Lines, 98,9 %
+  Branches; `set-suggest.ts` selbst 100 %/100 %. Keine offenen Fragen.

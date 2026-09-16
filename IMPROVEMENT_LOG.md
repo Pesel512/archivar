@@ -18,3 +18,5 @@ Chronologische Notizen zu Entscheidungen, Abweichungen und Nacharbeiten während
 - A6: CSV-Export (`core/csv.ts`) für Archidekt. Wertetabellen komplett mit `// VERIFY:`
   markiert, siehe `STATE_A.md` „Offene Fragen“. Bytelängen-Berechnung bewusst ohne
   TextEncoder/Buffer implementiert, um `core` plattformneutral zu halten.
+- A7: Set-Vorschlag (`core/set-suggest.ts`) inkl. aller Pflicht-Testfälle. Keine Abweichungen
+  vom Prompt.
