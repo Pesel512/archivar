@@ -6,6 +6,7 @@
     "node": ">=20"
   },
   "scripts": {
+    "dev": "pnpm --filter @pesel512/archivar-standalone run dev",
     "build": "pnpm --filter @pesel512/archivar-core run build && pnpm -r run build",
     "lint": "eslint .",
     "typecheck": "pnpm --filter @pesel512/archivar-core run build && pnpm -r run typecheck",

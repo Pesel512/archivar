@@ -1,0 +1,26 @@
+@import 'tailwindcss';
+
+@theme {
+  --color-bg: #0b0b0c;
+  --color-bg-elevated: #17181a;
+  --color-fg: #f2f2f2;
+  --color-fg-muted: #9a9a9a;
+  --color-accent: #4f8cff;
+  --color-border: #2a2b2e;
+  --color-danger: #e5484d;
+  --color-focus-ring: #4f8cff;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  background-color: var(--color-bg);
+  color: var(--color-fg);
+}
+
+*:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
