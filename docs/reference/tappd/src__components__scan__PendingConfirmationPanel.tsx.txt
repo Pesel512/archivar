@@ -1,0 +1,101 @@
+"use client";
+
+import { useTranslations } from "next-intl";
+import type { PendingConfirmation } from "@/components/scan/scan-types";
+
+interface PendingConfirmationPanelProps {
+  pendingConfirmation: PendingConfirmation;
+  onAnswerFoil: (value: boolean) => void;
+  onAnswerLanguage: (code: string) => void;
+  onAnswerSetSuggestion: (accept: boolean) => void;
+}
+
+/**
+ * Foil-/Sprach-/Set-Vorschlag-Bestätigungspanel (Iteration C) — extrahiert
+ * aus ScanCalibration.tsx (ARC-001). Rein präsentational: der Scan-Loop
+ * und das Gating ("wann ist eine Bestätigung vollständig") bleiben im
+ * Orchestrator, dieses Panel zeigt nur die jeweils noch offenen Felder an.
+ */
+export default function PendingConfirmationPanel({
+  pendingConfirmation,
+  onAnswerFoil,
+  onAnswerLanguage,
+  onAnswerSetSuggestion,
+}: PendingConfirmationPanelProps) {
+  const t = useTranslations("collection.scan");
+
+  return (
+    <div className="fixed inset-x-0 bottom-0 z-50 flex flex-col gap-3 rounded-t-2xl border-t border-tappd-accent bg-tappd-surface p-4 shadow-[0_-4px_20px_rgba(0,0,0,0.3)]">
+      <p className="text-sm font-semibold text-tappd-text">
+        {t("confirmCardLabel", { name: pendingConfirmation.card.name })}
+      </p>
+
+      {pendingConfirmation.foil === null && (
+        <div className="flex flex-col gap-2">
+          <p className="text-xs text-tappd-text-secondary">{t("foilPromptLabel")}</p>
+          <div className="flex gap-3">
+            <button
+              type="button"
+              onClick={() => onAnswerFoil(false)}
+              className="flex-1 rounded-xl border border-tappd-border bg-tappd-bg py-4 text-base font-semibold text-tappd-text"
+            >
+              {t("foilNormal")}
+            </button>
+            <button
+              type="button"
+              onClick={() => onAnswerFoil(true)}
+              className="flex-1 rounded-xl bg-tappd-accent py-4 text-base font-semibold text-white"
+            >
+              {t("foilFoil")}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {pendingConfirmation.language === null && (
+        <div className="flex flex-col gap-2">
+          <p className="text-xs text-tappd-text-secondary">{t("languagePromptLabel")}</p>
+          <div className="flex flex-wrap gap-2">
+            {pendingConfirmation.languageOptions.map((code) => (
+              <button
+                key={code}
+                type="button"
+                onClick={() => onAnswerLanguage(code)}
+                className="min-w-[72px] flex-1 rounded-xl border border-tappd-border bg-tappd-bg py-4 text-base font-semibold text-tappd-text"
+              >
+                {code}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {pendingConfirmation.setSuggestion && !pendingConfirmation.setSuggestion.answered && (
+        <div className="flex flex-col gap-2 border-t border-tappd-border pt-3">
+          <p className="text-xs text-tappd-text-secondary">
+            {t("setSuggestionLabel", {
+              name: pendingConfirmation.setSuggestion.name,
+              code: pendingConfirmation.setSuggestion.code.toUpperCase(),
+            })}
+          </p>
+          <div className="flex gap-3">
+            <button
+              type="button"
+              onClick={() => onAnswerSetSuggestion(false)}
+              className="flex-1 rounded-xl border border-tappd-border bg-tappd-bg py-3 text-sm font-semibold text-tappd-text"
+            >
+              {t("setSuggestionNo")}
+            </button>
+            <button
+              type="button"
+              onClick={() => onAnswerSetSuggestion(true)}
+              className="flex-1 rounded-xl bg-tappd-accent py-3 text-sm font-semibold text-white"
+            >
+              {t("setSuggestionYes")}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

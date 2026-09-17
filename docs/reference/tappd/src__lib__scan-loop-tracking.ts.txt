@@ -1,0 +1,22 @@
+import { INITIAL_STABILITY_STATE, type StabilityState } from "@/lib/scan-stability";
+
+/**
+ * Der gesamte veränderliche "Fortschritts"-Zustand eines Scan-Loop-Durchlaufs:
+ * Stabilitätskriterium + Re-Add-Schutz (Iteration B) plus Fehlversuchs-Zähler
+ * für die Set-Vorauswahl (Politur-Iteration). Wird an mehreren Stellen auf
+ * einen Schlag zurückgesetzt (Session-Start, Session-Set-Wechsel) — als EIN
+ * Objekt in EINEM Ref statt drei einzelner Refs, damit der Reset selbst eine
+ * separat testbare reine Funktion ist statt verstreuter Einzelzuweisungen.
+ */
+export interface ScanLoopTrackingState {
+  stability: StabilityState;
+  lastAddedKey: string | null;
+  /** Aufeinanderfolgende erfolglose Erkennungsversuche bei aktivem Session-Set (Plausibilitätsprüfung ODER Scryfall-404) — siehe `NOT_FOUND_HINT_THRESHOLD` in `ScanCalibration.tsx`. */
+  notFoundStreak: number;
+  /** Verhindert, dass derselbe (weiterhin im Bild liegende) fehlgeschlagene Kandidat bei jedem Tick erneut den Zähler erhöht — analog zu `lastAddedKey`. */
+  lastFailedKey: string | null;
+}
+
+export function createInitialScanLoopTracking(): ScanLoopTrackingState {
+  return { stability: INITIAL_STABILITY_STATE, lastAddedKey: null, notFoundStreak: 0, lastFailedKey: null };
+}

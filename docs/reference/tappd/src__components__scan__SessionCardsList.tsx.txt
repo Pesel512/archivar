@@ -1,0 +1,105 @@
+"use client";
+
+import Image from "next/image";
+import { useTranslations } from "next-intl";
+import type { SessionCardEntry } from "@/lib/scan-session";
+import { getCardImage, type ScryfallCard } from "@/lib/scryfall";
+import type { LastAction } from "@/components/scan/scan-types";
+
+interface SessionCardsListProps {
+  sessionCards: SessionCardEntry[];
+  lastCapture: { card: ScryfallCard; foil: boolean } | null;
+  lastAction: LastAction | null;
+  showEmptyHint: boolean;
+  onUndo: () => void;
+}
+
+/**
+ * Zuletzt erfasste Karte + Session-Kartenliste (max. 5 Einträge) + Undo —
+ * extrahiert aus ScanCalibration.tsx (ARC-001). Rein präsentational, der
+ * Schreibpfad (Sammlung/Export) bleibt bewusst im Orchestrator, da er ein
+ * eigenständiger, vom reinen Anzeigen unabhängiger Verantwortungsbereich ist.
+ */
+export default function SessionCardsList({
+  sessionCards,
+  lastCapture,
+  lastAction,
+  showEmptyHint,
+  onUndo,
+}: SessionCardsListProps) {
+  const t = useTranslations("collection.scan");
+
+  return (
+    <>
+      {showEmptyHint && <p className="text-xs text-tappd-text-secondary">{t("sessionEmptyHint")}</p>}
+
+      {lastCapture && (
+        <div className="flex items-center gap-3 rounded-lg bg-tappd-bg p-3">
+          {getCardImage(lastCapture.card, "small") && (
+            <div className="relative h-16 w-12 shrink-0 overflow-hidden rounded-md bg-tappd-surface">
+              <Image
+                src={getCardImage(lastCapture.card, "small")!}
+                alt={lastCapture.card.name}
+                fill
+                unoptimized
+                sizes="48px"
+                className="object-cover"
+              />
+            </div>
+          )}
+          <div>
+            <p className="text-sm font-semibold text-tappd-text">{lastCapture.card.name}</p>
+            <p className="text-xs text-tappd-text-secondary">
+              {lastCapture.card.set.toUpperCase()} · {lastCapture.card.collector_number} ·{" "}
+              {lastCapture.card.lang.toUpperCase()}
+              {lastCapture.foil && ` · ${t("foilBadge")}`}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {sessionCards.length > 0 && (
+        <>
+          <p className="text-xs text-tappd-text-secondary">
+            {t("sessionTotal", {
+              count: sessionCards.reduce((sum, entry) => sum + entry.quantity, 0),
+              unique: sessionCards.length,
+            })}
+          </p>
+
+          <ul className="flex flex-col gap-2">
+            {sessionCards.slice(0, 5).map((entry) => (
+              <li
+                key={`${entry.scryfallId}:${entry.foil}`}
+                className="flex items-center gap-3 rounded-lg bg-tappd-bg p-2"
+              >
+                {entry.imageUri && (
+                  <div className="relative h-12 w-9 shrink-0 overflow-hidden rounded bg-tappd-surface">
+                    <Image src={entry.imageUri} alt={entry.name} fill unoptimized sizes="36px" className="object-cover" />
+                  </div>
+                )}
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm text-tappd-text">{entry.name}</p>
+                  <p className="text-xs text-tappd-text-secondary">
+                    {entry.setCode.toUpperCase()} · {entry.collectorNumber} · {entry.language}
+                    {entry.foil && ` · ${t("foilBadge")}`}
+                  </p>
+                </div>
+                <span className="shrink-0 text-sm font-semibold text-tappd-accent">×{entry.quantity}</span>
+              </li>
+            ))}
+          </ul>
+
+          <button
+            type="button"
+            onClick={onUndo}
+            disabled={!lastAction}
+            className="self-start text-xs font-medium text-tappd-accent hover:underline disabled:cursor-not-allowed disabled:opacity-50 disabled:no-underline"
+          >
+            {t("undoLastCapture")}
+          </button>
+        </>
+      )}
+    </>
+  );
+}

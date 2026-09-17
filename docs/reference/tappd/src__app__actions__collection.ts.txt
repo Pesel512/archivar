@@ -1,0 +1,431 @@
+"use server";
+
+import { revalidatePath } from "next/cache";
+import { prisma } from "@/lib/prisma";
+import { requireUserId } from "@/lib/auth-helpers";
+import { upsertScryfallCard } from "@/lib/cards";
+import { getCard, getCardsByIds, getCardBySetAndNumber, getCardByFuzzyName } from "@/lib/scryfall";
+import { computeMissingCardsAcrossDecks } from "@/lib/missing-cards";
+import { parseCollectionCsv } from "@/lib/collection-import";
+import { mapWithConcurrency } from "@/lib/utils";
+import { resyncAllocationsForCard } from "@/lib/deck-allocation-sync";
+import type { ActionResult } from "@/lib/action-result";
+
+/**
+ * SEC-004: nimmt vom Client nur `scryfallId` (+ `foil`) an — Kartenstammdaten
+ * (Name/Bild/Preis/Oracle-Text) werden serverseitig über `getCard()` +
+ * `upsertScryfallCard()` aufgelöst (gleiches Muster wie
+ * `addScannedCardsToCollection()`). `Card` ist eine global geteilte Tabelle
+ * (alle Decks + Sammlungen referenzieren dieselbe Zeile per `scryfallId`) —
+ * Client-gelieferte Stammdaten hätten diese Zeile für ALLE Nutzer vergiften
+ * können (falscher Name/Preis, beliebige Bild-URL).
+ */
+export async function addToCollection(scryfallId: string, foil: boolean = false): Promise<ActionResult> {
+  const userId = await requireUserId();
+
+  const scryfallCard = await getCard(scryfallId);
+  if (!scryfallCard) {
+    return { ok: false, code: "card_not_found" };
+  }
+
+  const card = await upsertScryfallCard(scryfallCard);
+
+  await prisma.collectionEntry.upsert({
+    where: { userId_cardId_foil: { userId, cardId: card.id, foil } },
+    update: { quantity: { increment: 1 } },
+    create: { userId, cardId: card.id, foil },
+  });
+
+  // Neue Kapazität kann bisher unerfüllte Deck-Bedarfe schließen (FEAT-013).
+  void resyncAllocationsForCard(userId, card.name);
+
+  revalidatePath("/collection");
+
+  return { ok: true };
+}
+
+export interface ScannedCollectionEntry {
+  scryfallId: string;
+  quantity: number;
+  foil: boolean;
+}
+
+/**
+ * Batch-Schreibpfad für den Card Scanner (Feature [22], Iteration D). Nur
+ * Scryfall-IDs + Menge + Finish kommen vom Client — Name/Bild/Preis etc.
+ * werden hier server-seitig frisch per `getCardsByIds()` geladen (gleiches
+ * Prinzip wie `upsertScryfallCard()`: Card-Stammdaten dürfen nie aus
+ * Client-Eingaben stammen). Merged Einträge serverseitig nach Scryfall-ID +
+ * Finish (Freigabe-Auflage aus dem Mini-Plan), auch wenn die Session-Liste
+ * im Client (`ScanCalibration.tsx`) bereits dedupliziert — kein Verlass auf
+ * clientseitige Vorarbeit.
+ */
+export async function addScannedCardsToCollection(entries: ScannedCollectionEntry[]) {
+  const userId = await requireUserId();
+  if (entries.length === 0) return { addedUnique: 0, addedTotal: 0 };
+
+  const merged = new Map<string, ScannedCollectionEntry>();
+  for (const entry of entries) {
+    if (entry.quantity <= 0) continue;
+    const key = `${entry.scryfallId}:${entry.foil}`;
+    const existing = merged.get(key);
+    if (existing) {
+      existing.quantity += entry.quantity;
+    } else {
+      merged.set(key, { ...entry });
+    }
+  }
+
+  const uniqueScryfallIds = Array.from(new Set(entries.map((entry) => entry.scryfallId)));
+  const scryfallCards = await getCardsByIds(uniqueScryfallIds);
+  const scryfallCardById = new Map(scryfallCards.map((card) => [card.id, card]));
+
+  let addedUnique = 0;
+  let addedTotal = 0;
+  const touchedCardNames = new Set<string>();
+
+  for (const { scryfallId, foil, quantity } of merged.values()) {
+    const scryfallCard = scryfallCardById.get(scryfallId);
+    // Druck wurde inzwischen entfernt/umgezogen — überspringen statt den
+    // ganzen Batch abzubrechen (die übrigen Karten sollen trotzdem ankommen).
+    if (!scryfallCard) continue;
+
+    const card = await upsertScryfallCard(scryfallCard);
+
+    await prisma.collectionEntry.upsert({
+      where: { userId_cardId_foil: { userId, cardId: card.id, foil } },
+      update: { quantity: { increment: quantity } },
+      create: { userId, cardId: card.id, foil, quantity },
+    });
+
+    addedUnique += 1;
+    addedTotal += quantity;
+    touchedCardNames.add(card.name);
+  }
+
+  // Neue Kapazität kann bisher unerfüllte Deck-Bedarfe schließen (FEAT-013),
+  // ein Resync PRO eindeutigem Kartennamen statt pro Batch-Zeile.
+  for (const name of touchedCardNames) {
+    void resyncAllocationsForCard(userId, name);
+  }
+
+  revalidatePath("/collection");
+  revalidatePath("/collection/missing");
+
+  return { addedUnique, addedTotal };
+}
+
+const CSV_IMPORT_CONCURRENCY = 10;
+// Praktische Obergrenze gegen einen Serverless-Timeout bei einem einzigen
+// Riesen-CSV — reale Sammlungen (FEAT-003: "teils fünfstellige Kartenzahlen")
+// bräuchten mehrere Durchläufe, wenn sie diese Grenze überschreiten. Kein
+// Chunking/Fortschrittsanzeige in dieser Iteration (v1-Vereinfachung).
+const MAX_CSV_IMPORT_ROWS = 2000;
+
+export interface CollectionCsvImportSummary {
+  addedUnique: number;
+  addedTotal: number;
+  notFound: string[];
+  skippedLines: number;
+}
+
+/**
+ * FEAT-003: CSV-Sammlungs-Import. Erwartet dasselbe Spalten-Set wie
+ * `buildArchidektCsv()` (Quantity/Name/Edition/Collector Number/Foil,
+ * case-insensitiv + ein paar Aliase, siehe `parseCollectionCsv()`) — echter
+ * Round-Trip zum bestehenden Export. Zeilen werden zuerst über Set+Collector
+ * Number aufgelöst (druckgenau, `getCardBySetAndNumber()`), bei Fehlschlag
+ * per unscharfer Namenssuche (`getCardByFuzzyName()`) — gleiche
+ * Zwei-Stufen-Strategie wie beim OCR-Scan-Loop (Set-Vorauswahl-Pfad) und
+ * beim Deck-Text-Import. Schreibt über die bestehende, bereits gehärtete
+ * `addScannedCardsToCollection()` (SEC-004: Stammdaten kommen ausschließlich
+ * aus Scryfall, nie aus der CSV selbst außer Menge/Foil).
+ */
+export async function importCollectionFromCsv(
+  csvText: string,
+): Promise<ActionResult<CollectionCsvImportSummary>> {
+  await requireUserId();
+
+  const { rows, skippedLines } = parseCollectionCsv(csvText);
+
+  if (rows.length === 0) {
+    return { ok: false, code: "collection_csv_empty" };
+  }
+  if (rows.length > MAX_CSV_IMPORT_ROWS) {
+    return { ok: false, code: "collection_csv_too_large" };
+  }
+
+  const notFound: string[] = [];
+  const resolved: ScannedCollectionEntry[] = [];
+
+  await mapWithConcurrency(rows, CSV_IMPORT_CONCURRENCY, async (row) => {
+    const scryfallCard =
+      (row.setCode && row.collectorNumber ? await getCardBySetAndNumber(row.setCode, row.collectorNumber) : null) ??
+      (await getCardByFuzzyName(row.name));
+
+    if (!scryfallCard) {
+      notFound.push(row.name);
+      return;
+    }
+
+    resolved.push({ scryfallId: scryfallCard.id, quantity: row.quantity, foil: row.foil });
+  });
+
+  const { addedUnique, addedTotal } = await addScannedCardsToCollection(resolved);
+
+  return { ok: true, addedUnique, addedTotal, notFound, skippedLines };
+}
+
+const COLLECTION_PAGE_SIZE = 60;
+
+/**
+ * PERF-004: cursor-paginiert (gleiches Muster wie `getNotifications()`/
+ * `getPosts()`) statt die komplette Sammlung auf einmal zu laden — der
+ * Card Scanner legt Sammlungen gezielt auf Masse (2.000–10.000 Karten) an,
+ * ein ungebremstes `findMany` würde dort einen Multi-MB-RSC-Payload und
+ * tausende gleichzeitige Bild-Requests erzeugen.
+ */
+export async function getCollection(cursor?: string) {
+  const userId = await requireUserId();
+
+  const entries = await prisma.collectionEntry.findMany({
+    where: { userId },
+    include: { card: true },
+    orderBy: { createdAt: "desc" },
+    take: COLLECTION_PAGE_SIZE + 1,
+    ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
+  });
+
+  const hasMore = entries.length > COLLECTION_PAGE_SIZE;
+  const page = hasMore ? entries.slice(0, COLLECTION_PAGE_SIZE) : entries;
+
+  return {
+    entries: page.map((entry) => ({
+      ...entry,
+      card: {
+        ...entry.card,
+        eurPrice: entry.card.eurPrice ? Number(entry.card.eurPrice) : null,
+      },
+    })),
+    nextCursor: hasMore ? page[page.length - 1].id : null,
+  };
+}
+
+/**
+ * Namen aller Karten, die der Nutzer in irgendeinem Druck besitzt — für die
+ * Besitz-Anzeige im Deck Builder. Namensbasiert (nicht druckgenau, siehe
+ * CLAUDE.md "Besitz-Anzeige"): ein Deck kann einen anderen Druck referenzieren
+ * als der, der in der Sammlung liegt, das Badge soll trotzdem angezeigt werden.
+ */
+export async function getOwnedCardNames(): Promise<string[]> {
+  const userId = await requireUserId();
+
+  const entries = await prisma.collectionEntry.findMany({
+    where: { userId },
+    select: { card: { select: { name: true } } },
+  });
+
+  return Array.from(new Set(entries.map((entry) => entry.card.name)));
+}
+
+/**
+ * Wechselt den Druck (Scryfall-ID) eines CollectionEntry, ohne die
+ * Kartenidentität zu ändern (gleiche Begründung/Namensprüfung wie
+ * `updateCardPrint()` in `decks.ts`). Existiert bereits ein Eintrag für den
+ * Zieldruck (`[userId, cardId]`), werden die Mengen zusammengeführt statt
+ * den Unique-Constraint zu verletzen.
+ */
+export async function updateCollectionEntryPrint(
+  entryId: string,
+  newScryfallId: string,
+): Promise<ActionResult> {
+  const userId = await requireUserId();
+
+  const entry = await prisma.collectionEntry.findUniqueOrThrow({
+    where: { id: entryId },
+    include: { card: true },
+  });
+
+  if (entry.userId !== userId) {
+    return { ok: false, code: "collection_entry_not_owner" };
+  }
+
+  if (entry.card.scryfallId === newScryfallId) return { ok: true };
+
+  const scryfallCard = await getCard(newScryfallId);
+  if (!scryfallCard) {
+    return { ok: false, code: "print_load_failed" };
+  }
+  if (scryfallCard.name !== entry.card.name) {
+    return { ok: false, code: "print_card_mismatch" };
+  }
+
+  const targetCard = await upsertScryfallCard(scryfallCard);
+
+  const existing = await prisma.collectionEntry.findUnique({
+    where: { userId_cardId_foil: { userId, cardId: targetCard.id, foil: entry.foil } },
+  });
+
+  if (existing) {
+    // $transaction (DB-002): Update + Delete atomar, gleiches Muster wie
+    // updateCardBoard()/updateCardPrint() in decks.ts. Die gelöschte Zeile
+    // nimmt ihre CardAllocation-Zeilen per FK-Cascade mit — Resync unten
+    // baut sie an der verbliebenen (existing) Zeile neu auf (FEAT-013).
+    await prisma.$transaction([
+      prisma.collectionEntry.update({
+        where: { id: existing.id },
+        data: { quantity: existing.quantity + entry.quantity },
+      }),
+      prisma.collectionEntry.delete({ where: { id: entryId } }),
+    ]);
+  } else {
+    await prisma.collectionEntry.update({ where: { id: entryId }, data: { cardId: targetCard.id } });
+  }
+
+  void resyncAllocationsForCard(userId, entry.card.name);
+
+  revalidatePath("/collection");
+
+  return { ok: true };
+}
+
+/**
+ * Deckübergreifende Einkaufsliste (Backlog-Feature [13], FEAT-013 Stufe 1
+ * "mengen-ehrlich"): EIN Query über alle Decks des Nutzers statt einem
+ * Query pro Deck (kein N+1, gleiches Prinzip wie der `getReports()`-Fix),
+ * Gruppierung/Sortierung übernimmt die reine Funktion
+ * `computeMissingCardsAcrossDecks()`. `ownedQuantities` summiert
+ * `CollectionEntry.quantity` über ALLE Drucke/Foils einer Karte (nicht nur
+ * "besitze ich sie überhaupt?" wie vor FEAT-013) — eigene, gebündelte
+ * `collectionEntry.findMany`-Query statt `getOwnedCardNames()`, da diese
+ * nur Namen ohne Mengen liefert.
+ */
+export async function getMissingCardsAcrossDecks() {
+  const userId = await requireUserId();
+
+  const [deckCards, collectionEntries] = await Promise.all([
+    prisma.deckCard.findMany({
+      where: { deck: { userId } },
+      select: {
+        deckId: true,
+        quantity: true,
+        deck: { select: { name: true } },
+        card: { select: { name: true, scryfallId: true, imageUri: true, eurPrice: true } },
+      },
+    }),
+    prisma.collectionEntry.findMany({
+      where: { userId },
+      select: { quantity: true, card: { select: { name: true } } },
+    }),
+  ]);
+
+  const rows = deckCards.map((dc) => ({
+    cardName: dc.card.name,
+    scryfallId: dc.card.scryfallId,
+    imageUri: dc.card.imageUri,
+    eurPrice: dc.card.eurPrice !== null ? Number(dc.card.eurPrice) : null,
+    deckId: dc.deckId,
+    deckName: dc.deck.name,
+    quantity: dc.quantity,
+  }));
+
+  const ownedQuantities = new Map<string, number>();
+  for (const entry of collectionEntries) {
+    ownedQuantities.set(entry.card.name, (ownedQuantities.get(entry.card.name) ?? 0) + entry.quantity);
+  }
+
+  return computeMissingCardsAcrossDecks(rows, ownedQuantities);
+}
+
+export async function getCollectionValue() {
+  const userId = await requireUserId();
+
+  const entries = await prisma.collectionEntry.findMany({
+    where: { userId },
+    select: {
+      quantity: true,
+      card: { select: { eurPrice: true } },
+    },
+  });
+
+  return entries.reduce(
+    (sum, entry) => sum + entry.quantity * Number(entry.card.eurPrice ?? 0),
+    0,
+  );
+}
+
+export async function getCollectionStats() {
+  const userId = await requireUserId();
+
+  const [entries, value] = await Promise.all([
+    prisma.collectionEntry.findMany({
+      where: { userId },
+      select: {
+        quantity: true,
+        card: { select: { setName: true, priceUpdatedAt: true } },
+      },
+    }),
+    getCollectionValue(),
+  ]);
+
+  const total = entries.reduce((sum, entry) => sum + entry.quantity, 0);
+  const unique = entries.length;
+  const sets = new Set(
+    entries
+      .map((entry) => entry.card.setName)
+      .filter((setName): setName is string => Boolean(setName)),
+  ).size;
+
+  // FEAT-008: älteste bekannte Preisaktualisierung unter den besessenen
+  // Karten — zeigt das Alter des ANGEZEIGTEN Sammlungswerts, nicht nur den
+  // Zeitpunkt des letzten Cron-Laufs (der aktualisiert ALLE Karten, aber
+  // eine einzelne, seit Jahren nicht mehr angefasste Karte im Bestand
+  // dieses Nutzers kann trotzdem älter sein, falls sie beim letzten Cron-
+  // Lauf z.B. aus einem Scryfall-Fehler herausfiel). `null`, wenn
+  // mindestens eine besessene Karte noch NIE aktualisiert wurde (Altbestand
+  // vor FEAT-008) — Fail-open, kein irreführendes Datum vortäuschen.
+  const priceDates = entries.map((entry) => entry.card.priceUpdatedAt);
+  const oldestPriceUpdate =
+    entries.length > 0 && priceDates.every((date): date is Date => date !== null)
+      ? new Date(Math.min(...priceDates.map((date) => date.getTime())))
+      : null;
+
+  return { total, unique, sets, value, oldestPriceUpdate };
+}
+
+/** Obergrenze für die Wertentwicklung-Anzeige — bei täglicher Granularität
+ * deckt das gut ein Jahr ab, gleiches Cap-statt-Vollausbau-Prinzip wie die
+ * übrigen Listen-Obergrenzen (Phase-2-Restposten Batch D). */
+const VALUE_HISTORY_LIMIT = 365;
+
+export interface CollectionValueHistoryEntry {
+  date: Date;
+  value: number;
+  incomplete: boolean;
+}
+
+/**
+ * Liefert die letzten (max. `VALUE_HISTORY_LIMIT`) täglichen Sammlungswert-
+ * Snapshots des Nutzers, chronologisch aufsteigend (ältester zuerst — passend
+ * für eine Verlaufs-/Trend-Anzeige). Snapshots werden ausschließlich vom
+ * täglichen Preis-Refresh-Cron geschrieben (`snapshotCollectionValues()`),
+ * diese Funktion ist rein lesend.
+ */
+export async function getCollectionValueHistory(): Promise<CollectionValueHistoryEntry[]> {
+  const userId = await requireUserId();
+
+  const snapshots = await prisma.collectionValueSnapshot.findMany({
+    where: { userId },
+    orderBy: { snapshotDate: "desc" },
+    take: VALUE_HISTORY_LIMIT,
+    select: { snapshotDate: true, totalValueEur: true, incomplete: true },
+  });
+
+  return snapshots
+    .map((snapshot) => ({
+      date: snapshot.snapshotDate,
+      value: Number(snapshot.totalValueEur),
+      incomplete: snapshot.incomplete,
+    }))
+    .reverse();
+}

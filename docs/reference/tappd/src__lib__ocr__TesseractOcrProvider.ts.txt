@@ -1,0 +1,86 @@
+import { createWorker, PSM, type Worker } from "tesseract.js";
+import type { OcrCharacterMode, OcrImageSource, OcrProvider, OcrResult } from "./OcrProvider";
+
+/**
+ * Zeichen-Whitelist für den Ecken-Aufdruck (Collector Number, Rarity,
+ * Set-Code, Sprachcode, "•" als Trenner, "/" für "123/281"-Notation).
+ * Kein Kleinbuchstaben-Bedarf — auch deutsche Karten drucken diese Ecke
+ * in Ziffern + lateinischen Großbuchstaben.
+ */
+const FULL_CHAR_WHITELIST = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ/• ";
+
+/**
+ * Reduzierte Whitelist für Sessions mit optionaler Set-Vorauswahl (Praxis-
+ * Feedback-Politur): steht das Set schon fest, muss nur noch die Collector
+ * Number gelesen werden — kein Set-Code/Sprachcode-Bedarf mehr, also auch
+ * keine Großbuchstaben. Das eliminiert die O/0-, I/1-, B/8-Verwechslungen,
+ * die bei der vollen Whitelist zwischen Ziffern und ähnlich aussehenden
+ * Großbuchstaben entstehen. Enthält Kleinbuchstaben (für Suffixe wie "233a"/
+ * "233b") + "★" (Promo-Suffix) + "/" ("123/281"-Notation).
+ */
+const NUMBER_ONLY_CHAR_WHITELIST = "0123456789abcdefghijklmnopqrstuvwxyz★/ ";
+
+/**
+ * PWA-Fallback-OCR (Iteration E kann später eine native ML-Kit-Implementierung
+ * danebenstellen). `createWorker()` läuft in Tesseract.js bereits nativ in
+ * einem Web Worker — der Haupt-Thread (Livebild/UI) blockiert dadurch nie,
+ * auch wenn ein einzelner Frame mal deutlich länger als 300ms braucht; der
+ * Scan-Loop verarbeitet in dem Fall einfach weniger Frames pro Sekunde.
+ *
+ * Lädt bewusst NUR die "eng"-Traineddata (~2MB statt Multi-Sprachen-Pakete) —
+ * die gescannte Ecke enthält nie Fließtext, nur Ziffern/Großbuchstaben, das
+ * gilt unabhängig von der Kartensprache. Die Kartensprache selbst kommt aus
+ * dem separaten Sprachcode im Aufdruck (LANG_RE), nicht aus der OCR-Sprache.
+ */
+export class TesseractOcrProvider implements OcrProvider {
+  private workerPromise: Promise<Worker> | null = null;
+  private characterMode: OcrCharacterMode = "full";
+
+  private async getWorker(): Promise<Worker> {
+    if (!this.workerPromise) {
+      this.workerPromise = createWorker(["eng"]).then(async (worker) => {
+        await worker.setParameters({
+          tessedit_char_whitelist: FULL_CHAR_WHITELIST,
+          // SINGLE_BLOCK statt AUTO/SPARSE_TEXT: der (hochskalierte) Crop ist
+          // ein zusammenhängender Textblock (2 Zeilen), kein Foto mit über die
+          // Fläche verstreutem Text. SPARSE_TEXT wurde real getestet und lieferte
+          // nur einzelne, wechselnde Buchstaben statt der zusammenhängenden
+          // Zeilen — SINGLE_BLOCK behandelt den Crop als EINEN Block und
+          // segmentiert dadurch Zeilen/Wörter konsistenter.
+          tessedit_pageseg_mode: PSM.SINGLE_BLOCK,
+        });
+        return worker;
+      });
+    }
+    return this.workerPromise;
+  }
+
+  async recognize(image: OcrImageSource): Promise<OcrResult> {
+    const worker = await this.getWorker();
+    const { data } = await worker.recognize(image);
+    return { text: data.text, confidence: data.confidence };
+  }
+
+  /**
+   * `setParameters()` wirkt auf den bereits laufenden Worker — kein Neustart
+   * nötig (teuer: Traineddata neu laden). No-Op, wenn der Modus unverändert
+   * bleibt (vermeidet einen unnötigen IPC-Roundtrip zum Worker).
+   */
+  async setCharacterMode(mode: OcrCharacterMode): Promise<void> {
+    if (mode === this.characterMode) return;
+
+    const worker = await this.getWorker();
+    await worker.setParameters({
+      tessedit_char_whitelist: mode === "numberOnly" ? NUMBER_ONLY_CHAR_WHITELIST : FULL_CHAR_WHITELIST,
+    });
+    this.characterMode = mode;
+  }
+
+  async terminate(): Promise<void> {
+    if (!this.workerPromise) return;
+    const worker = await this.workerPromise;
+    this.workerPromise = null;
+    this.characterMode = "full";
+    await worker.terminate();
+  }
+}

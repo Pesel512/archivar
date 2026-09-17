@@ -1,0 +1,133 @@
+"use client";
+
+import { useTranslations } from "next-intl";
+import type { ScanProfile } from "@prisma/client";
+import type { ScryfallSet } from "@/lib/scryfall";
+import SetAutocomplete from "@/components/scan/SetAutocomplete";
+import Modal from "@/components/ui/Modal";
+import type { SessionTarget } from "@/components/scan/scan-types";
+
+interface SessionSetupDialogProps {
+  profiles: ScanProfile[];
+  setupProfileId: string | null;
+  setupLanguageUniverse: string[];
+  setupLanguages: string[];
+  setupTarget: SessionTarget;
+  setupSelectedSet: ScryfallSet | null;
+  onProfileChange: (profileId: string) => void;
+  onToggleLanguage: (code: string) => void;
+  onTargetChange: (target: SessionTarget) => void;
+  onSelectedSetChange: (set: ScryfallSet | null) => void;
+  onCancel: () => void;
+  onConfirm: () => void;
+}
+
+/** Session-Setup-Dialog (Iteration C, Spec-Punkt 1) — extrahiert aus ScanCalibration.tsx (ARC-001). */
+export default function SessionSetupDialog({
+  profiles,
+  setupProfileId,
+  setupLanguageUniverse,
+  setupLanguages,
+  setupTarget,
+  setupSelectedSet,
+  onProfileChange,
+  onToggleLanguage,
+  onTargetChange,
+  onSelectedSetChange,
+  onCancel,
+  onConfirm,
+}: SessionSetupDialogProps) {
+  const t = useTranslations("collection.scan");
+
+  return (
+    <Modal onClose={onCancel} labelledBy="scan-setup-title">
+      <div className="flex w-full max-w-md flex-col gap-4 rounded-2xl border border-tappd-border bg-tappd-surface p-5">
+        <h2 id="scan-setup-title" className="text-lg font-bold text-tappd-text">{t("setupTitle")}</h2>
+
+        {profiles.length > 0 && (
+          <div className="flex flex-col gap-1">
+            <label htmlFor="setup-profile" className="text-xs text-tappd-text-secondary">
+              {t("setupProfileLabel")}
+            </label>
+            <select
+              id="setup-profile"
+              value={setupProfileId ?? ""}
+              onChange={(event) => onProfileChange(event.target.value)}
+              className="w-full rounded-lg border border-tappd-border bg-tappd-bg p-2.5 text-sm text-tappd-text focus:border-tappd-accent focus:outline-none"
+            >
+              <option value="">{t("setupProfileNone")}</option>
+              {profiles.map((profile) => (
+                <option key={profile.id} value={profile.id}>
+                  {profile.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        <div className="flex flex-col gap-1">
+          <p className="text-xs text-tappd-text-secondary">{t("setupLanguagesLabel")}</p>
+          <div className="flex flex-wrap gap-2">
+            {setupLanguageUniverse.map((code) => (
+              <button
+                key={code}
+                type="button"
+                onClick={() => onToggleLanguage(code)}
+                className={
+                  setupLanguages.includes(code)
+                    ? "rounded-full bg-tappd-accent px-3 py-1 text-xs font-semibold text-white"
+                    : "rounded-full border border-tappd-border px-3 py-1 text-xs font-medium text-tappd-text-secondary hover:border-tappd-accent"
+                }
+              >
+                {code}
+              </button>
+            ))}
+          </div>
+          {setupLanguages.length === 0 && (
+            <p role="alert" className="text-xs text-red-400">
+              {t("setupLanguagesRequired")}
+            </p>
+          )}
+        </div>
+
+        <div className="flex flex-col gap-1">
+          <label htmlFor="setup-target" className="text-xs text-tappd-text-secondary">
+            {t("setupTargetLabel")}
+          </label>
+          <select
+            id="setup-target"
+            value={setupTarget}
+            onChange={(event) => onTargetChange(event.target.value as SessionTarget)}
+            className="w-full rounded-lg border border-tappd-border bg-tappd-bg p-2.5 text-sm text-tappd-text focus:border-tappd-accent focus:outline-none"
+          >
+            <option value="collection">{t("setupTargetCollection")}</option>
+            <option value="export">{t("setupTargetExport")}</option>
+          </select>
+        </div>
+
+        <div className="flex flex-col gap-1">
+          <label className="text-xs text-tappd-text-secondary">{t("setupSetLabel")}</label>
+          <SetAutocomplete value={setupSelectedSet} onSelect={onSelectedSetChange} />
+        </div>
+
+        <div className="flex justify-end gap-3">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="rounded-full px-4 py-2 text-sm font-medium text-tappd-text-secondary hover:text-tappd-text"
+          >
+            {t("setupCancel")}
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={setupLanguages.length === 0}
+            className="rounded-full bg-tappd-accent px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-tappd-accent/90 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {t("setupStart")}
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}

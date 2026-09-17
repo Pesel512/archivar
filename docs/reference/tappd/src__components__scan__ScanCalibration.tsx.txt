@@ -1,0 +1,1366 @@
+"use client";
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTranslations } from "next-intl";
+import type { ScanProfile } from "@prisma/client";
+import { createScanProfile, deleteScanProfile, type ScanProfileInput } from "@/app/actions/scan-profiles";
+import { addScannedCardsToCollection } from "@/app/actions/collection";
+import { TesseractOcrProvider } from "@/lib/ocr/TesseractOcrProvider";
+import SetAutocomplete from "@/components/scan/SetAutocomplete";
+import Modal from "@/components/ui/Modal";
+import SessionSetupDialog from "@/components/scan/SessionSetupDialog";
+import PendingConfirmationPanel from "@/components/scan/PendingConfirmationPanel";
+import SessionCardsList from "@/components/scan/SessionCardsList";
+import type { SessionTarget, PendingConfirmation, LastAction } from "@/components/scan/scan-types";
+import {
+  parseCornerText,
+  parseCollectorNumberOnly,
+  isCollectorNumberPlausible,
+  formatParsedCornerText,
+  type ParsedCornerText,
+} from "@/lib/card-scan-parsing";
+import { updateStability } from "@/lib/scan-stability";
+import { createInitialScanLoopTracking, type ScanLoopTrackingState } from "@/lib/scan-loop-tracking";
+import {
+  resolveAutoLanguage,
+  upsertSessionCard,
+  shouldOfferSetSuggestion,
+  type SessionCardEntry,
+} from "@/lib/scan-session";
+import { buildArchidektCsv } from "@/lib/archidekt-export";
+import {
+  getCardBySetAndNumber,
+  getCardBySetNumberAndLang,
+  getCardImage,
+  getSet,
+  type ScryfallCard,
+  type ScryfallSet,
+} from "@/lib/scryfall";
+
+const LANGUAGE_OPTIONS = ["DE", "EN", "FR", "IT", "ES", "PT", "JA", "KO", "RU", "ZHS", "ZHT"] as const;
+const DEFAULT_LANGUAGES = ["DE", "EN"];
+
+/** Merkt sich das zuletzt für eine Session genutzte Profil geräte-/browserlokal — ein Scan-Profil ist an eine physische Kamerahalterung gebunden, kein Account-weiter Zustand. */
+const LAST_PROFILE_STORAGE_KEY = "tappd:scan:last-profile-id";
+
+interface Roi {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** Großzügiger Default-Rahmen über der unteren linken Kartenecke (siehe Spec 1.4). */
+const DEFAULT_ROI: Roi = { x: 0.03, y: 0.7, width: 0.42, height: 0.24 };
+const MIN_ROI_SIZE = 0.08;
+
+/**
+ * Tesseract erkennt kleine Zeichen zuverlässiger, wenn sie deutlich größer
+ * als die native Kamera-Auflösung im Crop sind — ein enger ROI-Crop kann
+ * trotz scharfem Livebild nur wenige Dutzend Pixel hoch sein. Der Crop wird
+ * daher immer auf mindestens `MIN_UPSCALED_HEIGHT` hochskaliert (nie
+ * verkleinert), bevor die OCR läuft.
+ */
+const MIN_UPSCALED_HEIGHT = 240;
+
+/**
+ * Unter dieser ROI-Höhe (native Pixel) liefert Tesseract erfahrungsgemäß kaum
+ * brauchbare Treffer. 150 statt der ursprünglichen 80 — die tatsächliche
+ * Textzeile innerhalb der (bewusst großzügigen, siehe Spec 1.4) ROI ist
+ * deutlich kleiner als die ROI-Box selbst, 80px ROI-Höhe reichte real nicht
+ * für lesbare Zeichenhöhe.
+ */
+const MIN_ROI_PIXEL_HEIGHT = 150;
+
+function clamp01(value: number): number {
+  return Math.min(1, Math.max(0, value));
+}
+
+function clampByte(value: number): number {
+  return Math.min(255, Math.max(0, value));
+}
+
+/**
+ * Graustufen + Kontrast dämpft Foil-Reflexe in der Ecke (Spec 3.1). Der
+ * Kontrast-Faktor ist bewusst moderat (nicht binarisierend) — ein zu hoher
+ * Wert reißt dünne Ziffern-Striche in Fragmente statt sie zu stärken, was
+ * sich real als "Probleme mit den Zahlen" gezeigt hat. Über den
+ * `preprocessEnabled`-Toggle in der UI lässt sich das ganz abschalten, um
+ * zu vergleichen, ob die Vorverarbeitung im Einzelfall hilft oder schadet.
+ */
+function preprocessCanvas(canvas: HTMLCanvasElement): void {
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+
+  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const { data } = imageData;
+  const contrast = 1.25;
+  const intercept = 128 * (1 - contrast);
+
+  for (let i = 0; i < data.length; i += 4) {
+    const gray = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+    const adjusted = clampByte(gray * contrast + intercept);
+    data[i] = adjusted;
+    data[i + 1] = adjusted;
+    data[i + 2] = adjusted;
+  }
+
+  ctx.putImageData(imageData, 0, 0);
+}
+
+/** ~10 req/s Scryfall-Rate-Limit erlaubt problemlos ein Frame alle 300ms (Spec 3.1). */
+const SCAN_INTERVAL_MS = 300;
+
+/** Ab so vielen aufeinanderfolgenden erfolglosen Erkennungsversuchen bei aktivem Session-Set (Plausibilitätsprüfung ODER Scryfall-404) erscheint ein Hinweis, das Session-Set zu prüfen. */
+const NOT_FOUND_HINT_THRESHOLD = 3;
+
+/**
+ * `PendingConfirmation`/`LastAction` liegen in `scan-types.ts` (ARC-001 —
+ * gemeinsam mit `SessionSetupDialog`/`PendingConfirmationPanel`/
+ * `SessionCardsList` genutzt). Sind beide Felder einer `PendingConfirmation`
+ * bereits beim Erstellen bekannt (Session-weites Foil + eindeutig aufgelöste
+ * Sprache), wird gar kein Dialog gezeigt (siehe `runScanTick`).
+ */
+
+/**
+ * Crop + Upscale + optionale Vorverarbeitung — gemeinsam von Test-Scan und
+ * Scan-Loop genutzt (DRY), damit beide exakt denselben OCR-Input erzeugen.
+ */
+function captureRoiCanvas(video: HTMLVideoElement, roi: Roi, preprocess: boolean): HTMLCanvasElement {
+  const cropX = Math.round(roi.x * video.videoWidth);
+  const cropY = Math.round(roi.y * video.videoHeight);
+  const cropWidth = Math.round(roi.width * video.videoWidth);
+  const cropHeight = Math.round(roi.height * video.videoHeight);
+  const upscale = Math.max(1, MIN_UPSCALED_HEIGHT / cropHeight);
+
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(cropWidth * upscale);
+  canvas.height = Math.round(cropHeight * upscale);
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("CANVAS_CONTEXT_UNAVAILABLE");
+
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(video, cropX, cropY, cropWidth, cropHeight, 0, 0, canvas.width, canvas.height);
+  if (preprocess) preprocessCanvas(canvas);
+
+  return canvas;
+}
+
+function mapCaptureError(err: Error, t: (key: string) => string): string {
+  return err.message === "CANVAS_CONTEXT_UNAVAILABLE" ? t("canvasError") : err.message;
+}
+
+/**
+ * UX-007: `getUserMedia()`-Fehler kamen vorher als rohe `DOMException.message`
+ * beim Nutzer an (browser-/plattformspezifischer Text, oft technisch/englisch
+ * unabhängig von der App-Sprache). `DOMException.name` ist dagegen ein
+ * stabiler, standardisierter Bezeichner — darüber auf übersetzte, für Nutzer
+ * verständliche Texte gemappt. Unbekannte Namen fallen weiter auf den
+ * generischen `cameraError`-Text zurück (fail-open, kein Sonderfall nötig).
+ */
+const CAMERA_ERROR_KEYS: Record<string, string> = {
+  NotAllowedError: "cameraErrorDenied",
+  SecurityError: "cameraErrorDenied",
+  NotFoundError: "cameraErrorNotFound",
+  NotReadableError: "cameraErrorInUse",
+  OverconstrainedError: "cameraErrorConstraints",
+};
+
+function mapCameraError(err: unknown, t: (key: string) => string): string {
+  if (err instanceof DOMException && err.name in CAMERA_ERROR_KEYS) {
+    return t(CAMERA_ERROR_KEYS[err.name]);
+  }
+  return t("cameraError");
+}
+
+/**
+ * `focusMode`/`zoom` sind nicht Teil der TS-DOM-Typen (experimentell, nur
+ * einige Chromium-Browser, Safari-Support versionsabhängig). Best-effort:
+ * `focusMode` wird ignoriert, wo nicht unterstützt, statt getUserMedia()
+ * scheitern zu lassen (Constraints in `advanced` werden vom Browser
+ * übersprungen, nicht als Fehler behandelt). `zoom` wird explizit über
+ * `getCapabilities()` geprüft, bevor die UI einen Zoom-Regler anbietet.
+ */
+interface FocusConstraintSet extends MediaTrackConstraintSet {
+  focusMode?: string;
+  zoom?: number;
+}
+interface EnvironmentVideoConstraints extends MediaTrackConstraints {
+  advanced?: FocusConstraintSet[];
+}
+
+interface ZoomRange {
+  min: number;
+  max: number;
+  step: number;
+}
+interface ZoomCapableTrack extends MediaStreamTrack {
+  getCapabilities(): MediaTrackCapabilities & { zoom?: ZoomRange };
+}
+
+interface ScanCalibrationProps {
+  profiles: ScanProfile[];
+}
+
+export default function ScanCalibration({ profiles: initialProfiles }: ScanCalibrationProps) {
+  const t = useTranslations("collection.scan");
+
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const frameRef = useRef<HTMLDivElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const trackRef = useRef<MediaStreamTrack | null>(null);
+  const ocrRef = useRef<TesseractOcrProvider | null>(null);
+  const dragStartRef = useRef<{ pointerX: number; pointerY: number; roi: Roi } | null>(null);
+  const loopTrackingRef = useRef<ScanLoopTrackingState>(createInitialScanLoopTracking());
+  const scryfallCacheRef = useRef<Map<string, ScryfallCard | null>>(new Map());
+  const sessionCardsRef = useRef<SessionCardEntry[]>([]);
+  const pendingConfirmationRef = useRef<PendingConfirmation | null>(null);
+  const tickInFlightRef = useRef(false);
+  /** "Karte 1"-Set-Vorschlag (siehe `runScanTick`): darf nur einmal pro Session angeboten werden. */
+  const hasCapturedFirstCardRef = useRef(false);
+  const setSuggestionDeclinedRef = useRef(false);
+
+  const [profiles, setProfiles] = useState(initialProfiles);
+  const [cameraReady, setCameraReady] = useState(false);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [videoResolution, setVideoResolution] = useState<{ width: number; height: number } | null>(null);
+  const [zoomRange, setZoomRange] = useState<ZoomRange | null>(null);
+  const [zoomValue, setZoomValue] = useState<number | null>(null);
+  const [zoomError, setZoomError] = useState<string | null>(null);
+
+  const [roi, setRoi] = useState<Roi>(DEFAULT_ROI);
+  const [dragMode, setDragMode] = useState<"move" | "resize" | null>(null);
+
+  const [scanning, setScanning] = useState(false);
+  const [scanResult, setScanResult] = useState<ParsedCornerText | null>(null);
+  const [scanRawText, setScanRawText] = useState<string | null>(null);
+  const [scanError, setScanError] = useState<string | null>(null);
+  const [testScanSucceeded, setTestScanSucceeded] = useState(false);
+  const [preprocessEnabled, setPreprocessEnabled] = useState(true);
+  const [debugImageUrl, setDebugImageUrl] = useState<string | null>(null);
+
+  const [profileName, setProfileName] = useState("");
+  const [languages, setLanguages] = useState<string[]>(DEFAULT_LANGUAGES);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  const [sessionActive, setSessionActive] = useState(false);
+  const [sessionCards, setSessionCards] = useState<SessionCardEntry[]>([]);
+  const [lastCapture, setLastCapture] = useState<{ card: ScryfallCard; foil: boolean } | null>(null);
+  const [lastAction, setLastAction] = useState<LastAction | null>(null);
+  const [sessionError, setSessionError] = useState<string | null>(null);
+  const [isOnline, setIsOnline] = useState(() => (typeof navigator === "undefined" ? true : navigator.onLine));
+
+  // Session-Setup (Iteration C, Spec-Punkt 1): Profil/Sprachen/Ziel werden vor
+  // dem eigentlichen Start in einem Dialog gewählt, `sessionLanguages`/
+  // `sessionTarget` sind die für die AKTIVE Session bestätigten Werte
+  // (getrennt von den `setup*`-Entwürfen im Dialog selbst).
+  const [showSessionSetup, setShowSessionSetup] = useState(false);
+  const [setupProfileId, setSetupProfileId] = useState<string | null>(null);
+  const [setupLanguages, setSetupLanguages] = useState<string[]>(DEFAULT_LANGUAGES);
+  const [setupTarget, setSetupTarget] = useState<SessionTarget>("collection");
+
+  // Optionale Set-Vorauswahl (Politur-Iteration nach Praxis-Feedback): reiner
+  // Session-State, NICHT im ScanProfile gespeichert — wechselt je nach
+  // Display/Stapel, das gescannt wird. Auswahl per Autocomplete
+  // (`SetAutocomplete.tsx`) aus dem gecachten Scryfall-Set-Katalog, keine
+  // freie Texteingabe mehr (ersetzt die vorherige on-blur-Validierung).
+  const [setupSelectedSet, setSetupSelectedSet] = useState<ScryfallSet | null>(null);
+
+  const [sessionLanguages, setSessionLanguages] = useState<string[]>(DEFAULT_LANGUAGES);
+  const [sessionTarget, setSessionTarget] = useState<SessionTarget>("collection");
+  const [sessionSet, setSessionSet] = useState<ScryfallSet | null>(null);
+  const [showSetSwitcher, setShowSetSwitcher] = useState(false);
+  const [showSetNotFoundHint, setShowSetNotFoundHint] = useState(false);
+  const [pendingConfirmation, setPendingConfirmation] = useState<PendingConfirmation | null>(null);
+
+  // Iteration D: Ziel "Sammlung" schreibt per Batch-Action, Ziel "Export"
+  // zeigt eine kopierbare Archidekt-CSV (siehe Kommentar bei `buildArchidektCsv`).
+  const [savingToCollection, setSavingToCollection] = useState(false);
+  const [saveToCollectionError, setSaveToCollectionError] = useState<string | null>(null);
+  const [saveToCollectionSuccess, setSaveToCollectionSuccess] = useState<{
+    addedUnique: number;
+    addedTotal: number;
+  } | null>(null);
+  const [showExportPreview, setShowExportPreview] = useState(false);
+  const [exportCopied, setExportCopied] = useState(false);
+
+  useEffect(() => {
+    sessionCardsRef.current = sessionCards;
+  }, [sessionCards]);
+
+  useEffect(() => {
+    pendingConfirmationRef.current = pendingConfirmation;
+  }, [pendingConfirmation]);
+
+  useEffect(() => {
+    function handleOnline() {
+      setIsOnline(true);
+      setSessionError(null);
+    }
+    function handleOffline() {
+      setIsOnline(false);
+    }
+
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const video = videoRef.current;
+
+    /**
+     * iOS Safari (u.a.) negotiates die tatsächliche Stream-Auflösung teils erst
+     * nach `play()` — `loadedmetadata`/`resize` sind daher zusätzlich zum
+     * direkten Auslesen nach `play()` nötig, sonst bleibt `videoResolution`
+     * manchmal auf `null` bzw. veraltet stehen.
+     */
+    function handleResolutionChange() {
+      if (video && video.videoWidth > 0) {
+        setVideoResolution({ width: video.videoWidth, height: video.videoHeight });
+      }
+    }
+
+    async function startCamera() {
+      try {
+        // `ideal` statt `exact` — der Browser liefert die höchste unterstützte
+        // Auflösung bis zu diesem Wert, scheitert aber nicht, wenn das Gerät
+        // weniger kann (wichtig für iOS Safari, das sonst beim Default oft
+        // eine niedrigere Auflösung als möglich liefert).
+        const videoConstraints: EnvironmentVideoConstraints = {
+          facingMode: "environment",
+          width: { ideal: 4096 },
+          height: { ideal: 2160 },
+          advanced: [{ focusMode: "continuous" }],
+        };
+
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: videoConstraints,
+          audio: false,
+        });
+
+        if (cancelled) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+
+        streamRef.current = stream;
+        if (video) {
+          video.srcObject = stream;
+          await video.play();
+        }
+        setCameraReady(true);
+        handleResolutionChange();
+
+        const track = stream.getVideoTracks()[0] as ZoomCapableTrack | undefined;
+        trackRef.current = track ?? null;
+        const capabilities = track?.getCapabilities();
+        if (capabilities?.zoom) {
+          setZoomRange(capabilities.zoom);
+          setZoomValue(capabilities.zoom.min);
+        } else {
+          setZoomRange(null);
+        }
+      } catch (err) {
+        setCameraError(mapCameraError(err, t));
+      }
+    }
+
+    video?.addEventListener("loadedmetadata", handleResolutionChange);
+    video?.addEventListener("resize", handleResolutionChange);
+
+    startCamera();
+
+    return () => {
+      cancelled = true;
+      video?.removeEventListener("loadedmetadata", handleResolutionChange);
+      video?.removeEventListener("resize", handleResolutionChange);
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+      trackRef.current = null;
+    };
+  }, [t]);
+
+  useEffect(() => {
+    return () => {
+      ocrRef.current?.terminate();
+      ocrRef.current = null;
+    };
+  }, []);
+
+  const roiPixelSize = useMemo(() => {
+    if (!videoResolution) return null;
+    return {
+      width: Math.round(roi.width * videoResolution.width),
+      height: Math.round(roi.height * videoResolution.height),
+    };
+  }, [roi, videoResolution]);
+
+  const roiTooSmall = roiPixelSize !== null && roiPixelSize.height < MIN_ROI_PIXEL_HEIGHT;
+
+  /** Sprachen des im Setup-Dialog gewählten Profils — Universum der Session-Sprachen-Checkboxen (Spec: "Teilmenge der Profil-Sprachen"). Ohne gewähltes Profil steht die volle Codeliste zur Wahl. */
+  const setupLanguageUniverse = useMemo(() => {
+    const profile = profiles.find((entry) => entry.id === setupProfileId);
+    return profile?.languages ?? LANGUAGE_OPTIONS.slice();
+  }, [profiles, setupProfileId]);
+
+  const exportCsv = useMemo(() => buildArchidektCsv(sessionCards), [sessionCards]);
+
+  /**
+   * Zoom passiert geräteseitig VOR dem Downscaling auf den angefragten
+   * 4K-Stream (echter optischer/Sensor-Detailgewinn), nicht als Digitalzoom
+   * auf dem fertigen Frame — daher über `applyConstraints` am Track, nicht
+   * per CSS/Canvas-Skalierung.
+   */
+  const applyZoom = useCallback(
+    async (value: number) => {
+      const track = trackRef.current;
+      if (!track) return;
+
+      setZoomError(null);
+      try {
+        const constraints: EnvironmentVideoConstraints = { advanced: [{ zoom: value }] };
+        await track.applyConstraints(constraints);
+        setZoomValue(value);
+      } catch (err) {
+        setZoomError(err instanceof Error ? err.message : t("zoomError"));
+      }
+    },
+    [t],
+  );
+
+  const getOcrProvider = useCallback(() => {
+    if (!ocrRef.current) ocrRef.current = new TesseractOcrProvider();
+    return ocrRef.current;
+  }, []);
+
+  function handleRoiPointerDown(event: React.PointerEvent, mode: "move" | "resize") {
+    event.preventDefault();
+    event.stopPropagation();
+    (event.target as Element).setPointerCapture(event.pointerId);
+    dragStartRef.current = { pointerX: event.clientX, pointerY: event.clientY, roi };
+    setDragMode(mode);
+  }
+
+  function handleFramePointerMove(event: React.PointerEvent) {
+    if (!dragMode || !dragStartRef.current || !frameRef.current) return;
+
+    const bounds = frameRef.current.getBoundingClientRect();
+    const dx = (event.clientX - dragStartRef.current.pointerX) / bounds.width;
+    const dy = (event.clientY - dragStartRef.current.pointerY) / bounds.height;
+    const start = dragStartRef.current.roi;
+
+    if (dragMode === "move") {
+      setRoi({
+        x: clamp01(Math.min(1 - start.width, Math.max(0, start.x + dx))),
+        y: clamp01(Math.min(1 - start.height, Math.max(0, start.y + dy))),
+        width: start.width,
+        height: start.height,
+      });
+    } else {
+      setRoi({
+        x: start.x,
+        y: start.y,
+        width: Math.min(1 - start.x, Math.max(MIN_ROI_SIZE, start.width + dx)),
+        height: Math.min(1 - start.y, Math.max(MIN_ROI_SIZE, start.height + dy)),
+      });
+    }
+  }
+
+  function handleFramePointerUp() {
+    setDragMode(null);
+    dragStartRef.current = null;
+  }
+
+  async function handleTestScan() {
+    const video = videoRef.current;
+    if (!video || video.videoWidth === 0) return;
+
+    setScanning(true);
+    setScanError(null);
+    setScanResult(null);
+    setScanRawText(null);
+    setDebugImageUrl(null);
+    setTestScanSucceeded(false);
+
+    try {
+      const canvas = captureRoiCanvas(video, roi, preprocessEnabled);
+
+      const provider = getOcrProvider();
+      const { text } = await provider.recognize(canvas);
+      const parsed = parseCornerText(text);
+
+      setScanRawText(text);
+      setDebugImageUrl(canvas.toDataURL("image/png"));
+      setScanResult(parsed);
+      setTestScanSucceeded(Boolean(parsed.collectorNumber && parsed.setCode));
+    } catch (err) {
+      setScanError(err instanceof Error ? mapCaptureError(err, t) : t("scanError"));
+    } finally {
+      setScanning(false);
+    }
+  }
+
+  /**
+   * Löst Foil + Sprache in eine Session-Liste-Erfassung auf (Spec 3.1/4/5).
+   * Wird direkt aus `runScanTick()` gerufen, wenn beides bereits bekannt ist
+   * (kein Dialog nötig), oder aus dem `pendingConfirmation`-Effekt, sobald
+   * beide Felder durch Nutzer-Taps gesetzt sind. Reine Ref-/Setter-Zugriffe,
+   * daher stabil mit leerem Dependency-Array.
+   */
+  const finalizeCapture = useCallback(async (pending: PendingConfirmation) => {
+    const { card, foil, language } = pending;
+    if (foil === null || language === null) return;
+
+    let resolvedCard = card;
+    if (card.lang.toUpperCase() !== language) {
+      const langCacheKey = `${card.set.toLowerCase()}/${card.collector_number}/${language.toLowerCase()}`;
+      let langCard = scryfallCacheRef.current.get(langCacheKey);
+      if (langCard === undefined) {
+        langCard = await getCardBySetNumberAndLang(card.set, card.collector_number, language);
+        scryfallCacheRef.current.set(langCacheKey, langCard);
+      }
+      // Druck existiert nicht in der gewählten Sprache — Fallback auf den
+      // Basisdruck (Spec 4), die vom Nutzer bestätigte Sprache bleibt trotzdem
+      // am Session-Eintrag erhalten (siehe `incoming.language` unten).
+      resolvedCard = langCard ?? card;
+    }
+
+    navigator.vibrate?.(120);
+    setLastCapture({ card: resolvedCard, foil });
+    setSessionError(null);
+
+    const incoming = {
+      scryfallId: resolvedCard.id,
+      name: resolvedCard.name,
+      imageUri: getCardImage(resolvedCard, "small"),
+      setCode: resolvedCard.set,
+      collectorNumber: resolvedCard.collector_number,
+      foil,
+      language,
+    };
+
+    const { cards: nextCards, wasNew } = upsertSessionCard(sessionCardsRef.current, incoming);
+    setSessionCards(nextCards);
+    setLastAction({ scryfallId: resolvedCard.id, foil, wasNew });
+    setPendingConfirmation(null);
+  }, []);
+
+  // Sobald ein Tap das jeweils letzte offene Feld (Foil, Sprache, ggf. der
+  // Set-Vorschlag) einer laufenden Bestätigung setzt, sofort abschließen —
+  // kein extra "Bestätigen"-Tap.
+  useEffect(() => {
+    if (
+      pendingConfirmation &&
+      pendingConfirmation.foil !== null &&
+      pendingConfirmation.language !== null &&
+      (pendingConfirmation.setSuggestion === null || pendingConfirmation.setSuggestion.answered)
+    ) {
+      void finalizeCapture(pendingConfirmation);
+    }
+  }, [pendingConfirmation, finalizeCapture]);
+
+  /**
+   * Ein Scan-Zyklus: Frame croppen → OCR → parsen → Stabilitätskriterium →
+   * Scryfall-Validierung (gecacht) → Sprache auflösen → bei stabilem,
+   * validiertem Treffer in die Session-Liste aufnehmen (nach Foil-/ggf.
+   * Sprach-Bestätigungs-Tap — die Foil-Abfrage ist PFLICHT für jede Karte,
+   * es gibt keinen Session-weiten Auto-Foil-Modus mehr, siehe Praxis-
+   * Feedback-Politur). `tickInFlightRef` verhindert überlappende Zyklen,
+   * falls ein OCR-Durchlauf länger als `SCAN_INTERVAL_MS` dauert. Während
+   * eine Bestätigung aussteht, wird der Zyklus übersprungen (kein neuer OCR-
+   * Aufwand, bis der Nutzer geantwortet hat) — sobald sie abgeschlossen ist,
+   * läuft der Loop im nächsten Takt sofort weiter (Spec: "Dialog-Flow darf
+   * den Scan-Loop nicht ausbremsen").
+   *
+   * Bei aktiver Set-Vorauswahl (`sessionSet`) wird NUR die Collector Number
+   * geparst (`parseCollectorNumberOnly()`) — der Set-Code ist dann fix aus
+   * der Session, kein Set-Code-/Sprachcode-OCR nötig (die Zeichen-Whitelist
+   * ist für diesen Modus ohnehin auf Ziffern+Kleinbuchstaben reduziert, siehe
+   * `TesseractOcrProvider.setCharacterMode()` in `handleConfirmSessionSetup`).
+   * Vor dem (gecachten) Scryfall-Einzel-Lookup wird die erkannte Nummer noch
+   * gegen `sessionSet.card_count` plausibilisiert — spart unnötige
+   * 404-Anfragen für offensichtlich falsch gelesene Nummern.
+   */
+  const runScanTick = useCallback(async () => {
+    if (tickInFlightRef.current || pendingConfirmationRef.current) return;
+    const video = videoRef.current;
+    if (!video || video.videoWidth === 0) return;
+
+    if (!navigator.onLine) {
+      setSessionError(t("offlineError"));
+      return;
+    }
+
+    tickInFlightRef.current = true;
+    try {
+      const canvas = captureRoiCanvas(video, roi, preprocessEnabled);
+      const provider = getOcrProvider();
+      const { text } = await provider.recognize(canvas);
+
+      let collectorNumber: string | null;
+      let setCode: string | null;
+      let langCode: string | null;
+
+      if (sessionSet) {
+        collectorNumber = parseCollectorNumberOnly(text).collectorNumber;
+        setCode = sessionSet.code;
+        langCode = null;
+      } else {
+        const parsed = parseCornerText(text);
+        collectorNumber = parsed.collectorNumber;
+        setCode = parsed.setCode;
+        langCode = parsed.langCode;
+      }
+
+      if (!collectorNumber || !setCode) {
+        loopTrackingRef.current.stability = updateStability(loopTrackingRef.current.stability, null).state;
+        loopTrackingRef.current.lastAddedKey = null;
+        // Kamera zeigt gerade auf keine (lesbare) Ecke mehr — ein danach erneut
+        // vorgelegter, zuvor fehlgeschlagener Kandidat zählt als neuer Versuch.
+        loopTrackingRef.current.lastFailedKey = null;
+        return;
+      }
+
+      const key = `${setCode.toLowerCase()}/${collectorNumber}`;
+      const { state, isStable } = updateStability(loopTrackingRef.current.stability, key);
+      loopTrackingRef.current.stability = state;
+
+      if (!isStable) {
+        loopTrackingRef.current.lastAddedKey = null;
+        return;
+      }
+
+      // Nur bei aktiver Set-Vorauswahl gezählt (Spec: "bei aktivem Session-Set");
+      // ohne Set-Vorauswahl bleibt ein 404 wie bisher folgenlos. Dedupliziert über
+      // `lastFailedKey`, damit derselbe weiterhin im Bild liegende Fehlversuch
+      // nicht bei jedem 300ms-Takt erneut zählt.
+      const registerNotFound = () => {
+        if (!sessionSet || loopTrackingRef.current.lastFailedKey === key) return;
+        loopTrackingRef.current.notFoundStreak += 1;
+        loopTrackingRef.current.lastFailedKey = key;
+        if (loopTrackingRef.current.notFoundStreak >= NOT_FOUND_HINT_THRESHOLD) {
+          setShowSetNotFoundHint(true);
+        }
+      };
+
+      if (sessionSet && !isCollectorNumberPlausible(collectorNumber, sessionSet.card_count)) {
+        registerNotFound();
+        return;
+      }
+
+      // Karte liegt weiter im Bild und wurde bereits erfasst — nicht erneut hinzufügen.
+      if (key === loopTrackingRef.current.lastAddedKey) return;
+
+      let card = scryfallCacheRef.current.get(key);
+      if (card === undefined) {
+        card = await getCardBySetAndNumber(setCode, collectorNumber);
+        scryfallCacheRef.current.set(key, card);
+      }
+
+      // Kandidat validiert nicht gegen Scryfall (404) — kein Fehler, einfach weiterscannen.
+      if (!card) {
+        registerNotFound();
+        return;
+      }
+
+      loopTrackingRef.current.lastAddedKey = key;
+      loopTrackingRef.current.notFoundStreak = 0;
+      loopTrackingRef.current.lastFailedKey = null;
+      setShowSetNotFoundHint(false);
+
+      const isFirstCapture = !hasCapturedFirstCardRef.current;
+      hasCapturedFirstCardRef.current = true;
+
+      const offerSetSuggestion = shouldOfferSetSuggestion({
+        sessionSet,
+        isFirstCapture,
+        suggestionDeclined: setSuggestionDeclinedRef.current,
+      });
+
+      const autoLanguage = resolveAutoLanguage(langCode, sessionLanguages);
+      setPendingConfirmation({
+        card,
+        languageOptions: sessionLanguages,
+        foil: null,
+        language: autoLanguage,
+        setSuggestion: offerSetSuggestion ? { code: card.set, name: card.set_name, answered: false } : null,
+      });
+    } catch (err) {
+      setSessionError(err instanceof Error ? mapCaptureError(err, t) : t("scanError"));
+    } finally {
+      tickInFlightRef.current = false;
+    }
+  }, [roi, preprocessEnabled, sessionLanguages, sessionSet, getOcrProvider, t]);
+
+  useEffect(() => {
+    if (!sessionActive) return;
+
+    const intervalId = window.setInterval(() => {
+      void runScanTick();
+    }, SCAN_INTERVAL_MS);
+
+    return () => window.clearInterval(intervalId);
+  }, [sessionActive, runScanTick]);
+
+  function handleToggleSession() {
+    if (sessionActive) {
+      setSessionActive(false);
+      setPendingConfirmation(null);
+      setSessionSet(null);
+      setShowSetNotFoundHint(false);
+      void getOcrProvider().setCharacterMode("full");
+      return;
+    }
+
+    if (!navigator.onLine) {
+      setSessionError(t("offlineError"));
+      return;
+    }
+
+    setSessionError(null);
+
+    const lastUsedId = typeof window !== "undefined" ? window.localStorage.getItem(LAST_PROFILE_STORAGE_KEY) : null;
+    const defaultProfile = profiles.find((profile) => profile.id === lastUsedId) ?? profiles[0] ?? null;
+
+    setSetupProfileId(defaultProfile?.id ?? null);
+    setSetupLanguages(defaultProfile?.languages ?? DEFAULT_LANGUAGES);
+    setSetupTarget("collection");
+    setSetupSelectedSet(null);
+    setShowSessionSetup(true);
+  }
+
+  function handleSetupProfileChange(profileId: string) {
+    setSetupProfileId(profileId || null);
+    const profile = profiles.find((entry) => entry.id === profileId);
+    setSetupLanguages(profile?.languages ?? DEFAULT_LANGUAGES);
+  }
+
+  function toggleSetupLanguage(code: string) {
+    setSetupLanguages((prev) => (prev.includes(code) ? prev.filter((entry) => entry !== code) : [...prev, code]));
+  }
+
+  function handleConfirmSessionSetup() {
+    if (setupLanguages.length === 0) return;
+
+    const profile = profiles.find((entry) => entry.id === setupProfileId) ?? null;
+    if (profile) {
+      if (profile.roiX !== null && profile.roiY !== null && profile.roiWidth !== null && profile.roiHeight !== null) {
+        setRoi({ x: profile.roiX, y: profile.roiY, width: profile.roiWidth, height: profile.roiHeight });
+      }
+      if (profile.zoom !== null) {
+        void applyZoom(profile.zoom);
+      }
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(LAST_PROFILE_STORAGE_KEY, profile.id);
+      }
+    }
+
+    setSessionLanguages(setupLanguages);
+    setSessionTarget(setupTarget);
+    setSessionSet(setupSelectedSet);
+    void getOcrProvider().setCharacterMode(setupSelectedSet ? "numberOnly" : "full");
+    setSessionError(null);
+    loopTrackingRef.current = createInitialScanLoopTracking();
+    hasCapturedFirstCardRef.current = false;
+    setSuggestionDeclinedRef.current = false;
+    setShowSetNotFoundHint(false);
+    setPendingConfirmation(null);
+    setShowSessionSetup(false);
+    setSessionActive(true);
+  }
+
+  /** Set-Wechsel/-Aufhebung während einer laufenden Session (Badge-Tap → Set-Autocomplete). Setzt die Loop-Tracking-Zustände zurück, damit keine halb-erkannten Reste des alten Modus überleben — bereits erfasste Karten bleiben unangetastet. */
+  function handleSetSwitcherSelect(set: ScryfallSet | null) {
+    setSessionSet(set);
+    void getOcrProvider().setCharacterMode(set ? "numberOnly" : "full");
+    loopTrackingRef.current = createInitialScanLoopTracking();
+    setShowSetNotFoundHint(false);
+    setShowSetSwitcher(false);
+    // Ein noch unbeantworteter "Karte 1"-Set-Vorschlag wird durch die manuelle
+    // Wahl gegenstandslos — sonst würde der Bestätigungs-Effekt weiter auf eine
+    // Antwort warten, die nie mehr kommt.
+    setPendingConfirmation((prev) => (prev?.setSuggestion ? { ...prev, setSuggestion: null } : prev));
+  }
+
+  function handleAnswerFoil(value: boolean) {
+    setPendingConfirmation((prev) => (prev ? { ...prev, foil: value } : prev));
+  }
+
+  function handleAnswerLanguage(code: string) {
+    setPendingConfirmation((prev) => (prev ? { ...prev, language: code } : prev));
+  }
+
+  /**
+   * Set-Vorschlag nach Karte 1 (Ja/Nein). Bei "Ja" fehlt noch `card_count`
+   * (nur `code`/`name` liegen aus dem bereits validierten `ScryfallCard` vor,
+   * siehe `runScanTick`) — daher ein Nachladen per `getSet()`, BEVOR der
+   * `numberOnly`-Modus + die Plausibilitätsprüfung greifen können. Scheitert
+   * das Nachladen, bleibt die Session einfach ohne Set-Vorauswahl (reine
+   * Komfortfunktion, kein harter Fehler nötig). Bei "Nein" wird der Vorschlag
+   * für den Rest der Session nicht erneut angeboten.
+   */
+  function handleAnswerSetSuggestion(accept: boolean) {
+    const suggestion = pendingConfirmation?.setSuggestion;
+    if (!suggestion) return;
+
+    if (accept) {
+      getSet(suggestion.code)
+        .then((set) => {
+          if (!set) return;
+          setSessionSet(set);
+          void getOcrProvider().setCharacterMode("numberOnly");
+          loopTrackingRef.current = createInitialScanLoopTracking();
+          setShowSetNotFoundHint(false);
+        })
+        .catch(() => {
+          // Komfortfunktion — ein Fehlschlag hier blockiert nicht den Scan-Loop.
+        });
+    } else {
+      setSuggestionDeclinedRef.current = true;
+    }
+
+    setPendingConfirmation((prev) =>
+      prev && prev.setSuggestion ? { ...prev, setSuggestion: { ...prev.setSuggestion, answered: true } } : prev,
+    );
+  }
+
+  function handleUndoLastCapture() {
+    if (!lastAction) return;
+
+    setSessionCards((prev) => {
+      if (lastAction.wasNew) {
+        return prev.filter((entry) => !(entry.scryfallId === lastAction.scryfallId && entry.foil === lastAction.foil));
+      }
+      return prev
+        .map((entry) =>
+          entry.scryfallId === lastAction.scryfallId && entry.foil === lastAction.foil
+            ? { ...entry, quantity: entry.quantity - 1 }
+            : entry,
+        )
+        .filter((entry) => entry.quantity > 0);
+    });
+
+    if (lastCapture?.card.id === lastAction.scryfallId) {
+      setLastCapture(null);
+    }
+    setLastAction(null);
+  }
+
+  /**
+   * Schreibt die Session-Liste per Batch-Action in die Sammlung (Iteration D).
+   * Menge/Finish je Karte, keine weiteren Felder — Name/Bild/Preis lädt die
+   * Server Action selbst frisch von Scryfall (siehe `addScannedCardsToCollection`).
+   * Leert die Session-Liste bei Erfolg, damit ein erneuter Klick nicht doppelt
+   * schreibt.
+   */
+  async function handleSaveToCollection() {
+    if (sessionCards.length === 0) return;
+
+    setSavingToCollection(true);
+    setSaveToCollectionError(null);
+    setSaveToCollectionSuccess(null);
+
+    try {
+      const result = await addScannedCardsToCollection(
+        sessionCards.map((entry) => ({ scryfallId: entry.scryfallId, quantity: entry.quantity, foil: entry.foil })),
+      );
+      setSaveToCollectionSuccess(result);
+      setSessionCards([]);
+      setLastCapture(null);
+      setLastAction(null);
+    } catch (err) {
+      setSaveToCollectionError(err instanceof Error ? err.message : t("saveToCollectionError"));
+    } finally {
+      setSavingToCollection(false);
+    }
+  }
+
+  function handleCopyExportCsv() {
+    navigator.clipboard.writeText(buildArchidektCsv(sessionCards)).then(() => {
+      setExportCopied(true);
+      setTimeout(() => setExportCopied(false), 1500);
+    });
+  }
+
+  function toggleLanguage(code: string) {
+    setLanguages((prev) => (prev.includes(code) ? prev.filter((entry) => entry !== code) : [...prev, code]));
+  }
+
+  async function handleSaveProfile() {
+    if (!profileName.trim() || languages.length === 0) return;
+
+    setSaving(true);
+    setSaveError(null);
+
+    try {
+      const input: ScanProfileInput = {
+        name: profileName.trim(),
+        mode: "FIXED_ROI",
+        roiX: roi.x,
+        roiY: roi.y,
+        roiWidth: roi.width,
+        roiHeight: roi.height,
+        zoom: zoomValue ?? undefined,
+        languages,
+      };
+      const created = await createScanProfile(input);
+      setProfiles((prev) => [created, ...prev]);
+      setProfileName("");
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : t("saveError"));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleDeleteProfile(profile: ScanProfile) {
+    setDeleteError(null);
+    setProfiles((prev) => prev.filter((entry) => entry.id !== profile.id));
+
+    try {
+      await deleteScanProfile(profile.id);
+    } catch (err) {
+      setProfiles((prev) => [profile, ...prev]);
+      setDeleteError(err instanceof Error ? err.message : t("deleteError"));
+    }
+  }
+
+  function handleLoadProfile(profile: ScanProfile) {
+    if (
+      profile.roiX !== null &&
+      profile.roiY !== null &&
+      profile.roiWidth !== null &&
+      profile.roiHeight !== null
+    ) {
+      setRoi({ x: profile.roiX, y: profile.roiY, width: profile.roiWidth, height: profile.roiHeight });
+    }
+    setLanguages(profile.languages);
+    if (profile.zoom !== null) {
+      void applyZoom(profile.zoom);
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-6">
+      <div
+        ref={frameRef}
+        className="relative w-full overflow-hidden rounded-2xl bg-black"
+        onPointerMove={handleFramePointerMove}
+        onPointerUp={handleFramePointerUp}
+        onPointerCancel={handleFramePointerUp}
+      >
+        <video ref={videoRef} autoPlay muted playsInline className="block h-auto w-full" />
+
+        {!cameraReady && !cameraError && (
+          <div className="absolute inset-0 flex items-center justify-center text-sm text-tappd-text-secondary">
+            {t("cameraLoading")}
+          </div>
+        )}
+
+        {cameraReady && (
+          <div
+            className="absolute cursor-move border-2 border-tappd-accent bg-tappd-accent/10"
+            style={{
+              left: `${roi.x * 100}%`,
+              top: `${roi.y * 100}%`,
+              width: `${roi.width * 100}%`,
+              height: `${roi.height * 100}%`,
+              touchAction: "none",
+            }}
+            onPointerDown={(event) => handleRoiPointerDown(event, "move")}
+          >
+            <div
+              role="slider"
+              aria-label={t("resizeHandle")}
+              aria-valuenow={Math.round(roi.width * 100)}
+              tabIndex={0}
+              className="absolute -bottom-2 -right-2 h-5 w-5 cursor-nwse-resize rounded-full border-2 border-white bg-tappd-accent"
+              style={{ touchAction: "none" }}
+              onPointerDown={(event) => handleRoiPointerDown(event, "resize")}
+            />
+          </div>
+        )}
+      </div>
+
+      {cameraError && (
+        <p role="alert" className="text-sm text-red-400">
+          {cameraError}
+        </p>
+      )}
+
+      <p className="text-xs text-tappd-text-secondary">{t("roiHint")}</p>
+
+      {videoResolution && (
+        <p className="text-xs text-tappd-text-secondary">
+          {t("streamResolution", { width: videoResolution.width, height: videoResolution.height })}
+          {roiPixelSize && ` · ${t("roiPixelSize", { width: roiPixelSize.width, height: roiPixelSize.height })}`}
+          {zoomValue !== null && ` · ${t("zoomValue", { value: zoomValue.toFixed(1) })}`}
+        </p>
+      )}
+
+      {roiTooSmall && (
+        <p role="status" className="text-xs text-yellow-400">
+          {t("roiTooSmallWarning")}
+        </p>
+      )}
+
+      {cameraReady && zoomRange && (
+        <div className="flex flex-col gap-1">
+          <label htmlFor="scan-zoom" className="text-xs text-tappd-text-secondary">
+            {t("zoomLabel", { value: (zoomValue ?? zoomRange.min).toFixed(1) })}
+          </label>
+          <input
+            id="scan-zoom"
+            type="range"
+            min={zoomRange.min}
+            max={zoomRange.max}
+            step={zoomRange.step || 0.1}
+            value={zoomValue ?? zoomRange.min}
+            onChange={(event) => applyZoom(Number(event.target.value))}
+            className="accent-tappd-accent"
+          />
+        </div>
+      )}
+
+      {cameraReady && !zoomRange && <p className="text-xs text-tappd-text-secondary">{t("zoomUnavailable")}</p>}
+
+      {zoomError && (
+        <p role="alert" className="text-sm text-red-400">
+          {zoomError}
+        </p>
+      )}
+
+      <div className="flex flex-wrap items-center gap-4">
+        <button
+          type="button"
+          onClick={handleTestScan}
+          disabled={!cameraReady || scanning || sessionActive}
+          className="rounded-full bg-tappd-accent px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-tappd-accent/90 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {scanning ? t("scanning") : t("testScan")}
+        </button>
+
+        <label className="flex items-center gap-2 text-xs text-tappd-text-secondary">
+          <input
+            type="checkbox"
+            checked={preprocessEnabled}
+            onChange={(event) => setPreprocessEnabled(event.target.checked)}
+            className="accent-tappd-accent"
+          />
+          {t("preprocessToggle")}
+        </label>
+      </div>
+
+      {scanError && (
+        <p role="alert" className="text-sm text-red-400">
+          {scanError}
+        </p>
+      )}
+
+      {scanResult && (
+        <div
+          role="status"
+          className={
+            testScanSucceeded
+              ? "rounded-2xl border border-tappd-accent bg-tappd-accent/10 p-4 text-sm text-tappd-text"
+              : "rounded-2xl border border-tappd-border bg-tappd-surface p-4 text-sm text-tappd-text-secondary"
+          }
+        >
+          {formatParsedCornerText(scanResult)
+            ? t("scanResult", { result: formatParsedCornerText(scanResult) })
+            : t("scanNoResult")}
+        </div>
+      )}
+
+      {scanRawText !== null && (
+        <p className="break-words rounded-lg bg-tappd-bg p-2 font-mono text-xs text-tappd-text-secondary">
+          {t("scanRawText")} {scanRawText.trim() ? scanRawText.trim() : t("scanRawTextEmpty")}
+        </p>
+      )}
+
+      {debugImageUrl && (
+        <div className="flex flex-col gap-1">
+          <p className="text-xs text-tappd-text-secondary">{t("debugImageLabel")}</p>
+          {/* eslint-disable-next-line @next/next/no-img-element -- lokale Canvas-Data-URL, kein Scryfall-/Remote-Bild */}
+          <img
+            src={debugImageUrl}
+            alt={t("debugImageLabel")}
+            className="max-w-full rounded-lg border border-tappd-border"
+            style={{ imageRendering: "pixelated" }}
+          />
+        </div>
+      )}
+
+      {testScanSucceeded && (
+        <div className="flex flex-col gap-3 rounded-2xl border border-tappd-border bg-tappd-surface p-4">
+          <h2 className="text-sm font-semibold text-tappd-text">{t("saveProfileTitle")}</h2>
+
+          <input
+            type="text"
+            value={profileName}
+            onChange={(event) => setProfileName(event.target.value)}
+            placeholder={t("profileNamePlaceholder")}
+            className="w-full rounded-lg border border-tappd-border bg-tappd-bg p-3 text-sm text-tappd-text placeholder:text-tappd-text-secondary focus:border-tappd-accent focus:outline-none"
+          />
+
+          <div className="flex flex-wrap gap-2">
+            {LANGUAGE_OPTIONS.map((code) => (
+              <button
+                key={code}
+                type="button"
+                onClick={() => toggleLanguage(code)}
+                className={
+                  languages.includes(code)
+                    ? "rounded-full bg-tappd-accent px-3 py-1 text-xs font-semibold text-white"
+                    : "rounded-full border border-tappd-border px-3 py-1 text-xs font-medium text-tappd-text-secondary hover:border-tappd-accent"
+                }
+              >
+                {code}
+              </button>
+            ))}
+          </div>
+
+          {saveError && (
+            <p role="alert" className="text-sm text-red-400">
+              {saveError}
+            </p>
+          )}
+
+          <button
+            type="button"
+            onClick={handleSaveProfile}
+            disabled={saving || !profileName.trim() || languages.length === 0}
+            className="self-start rounded-full bg-tappd-accent px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-tappd-accent/90 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {saving ? t("saving") : t("saveProfile")}
+          </button>
+        </div>
+      )}
+
+      <div className="flex flex-col gap-3 rounded-2xl border border-tappd-border bg-tappd-surface p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="text-sm font-semibold text-tappd-text">{t("sessionTitle")}</h2>
+          <button
+            type="button"
+            onClick={handleToggleSession}
+            disabled={!cameraReady || scanning}
+            className={
+              sessionActive
+                ? "rounded-full bg-red-500 px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-red-500/90 disabled:cursor-not-allowed disabled:opacity-50"
+                : "rounded-full bg-tappd-accent px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-tappd-accent/90 disabled:cursor-not-allowed disabled:opacity-50"
+            }
+          >
+            {sessionActive ? t("stopSession") : t("startSession")}
+          </button>
+        </div>
+
+        {sessionActive && (
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="text-xs text-tappd-text-secondary">
+              {t("sessionTargetLabel")}:{" "}
+              {sessionTarget === "collection" ? t("setupTargetCollection") : t("setupTargetExport")}
+            </p>
+            <button
+              type="button"
+              onClick={() => setShowSetSwitcher(true)}
+              className="rounded-full border border-tappd-border px-3 py-1 text-xs font-medium text-tappd-text-secondary hover:border-tappd-accent hover:text-tappd-text"
+            >
+              {sessionSet ? t("sessionSetBadge", { code: sessionSet.code.toUpperCase() }) : t("sessionSetBadgeNone")}
+            </button>
+          </div>
+        )}
+
+        {showSetNotFoundHint && sessionSet && (
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-yellow-400/10 p-2">
+            <p role="status" className="text-xs text-yellow-400">
+              {t("setNotFoundHint", { code: sessionSet.code.toUpperCase() })}
+            </p>
+            <button
+              type="button"
+              onClick={() => setShowSetSwitcher(true)}
+              className="shrink-0 text-xs font-medium text-tappd-accent hover:underline"
+            >
+              {t("setSwitchAction")}
+            </button>
+          </div>
+        )}
+
+        {!isOnline && (
+          <p role="alert" className="text-sm text-red-400">
+            {t("offlineError")}
+          </p>
+        )}
+
+        {sessionError && (
+          <p role="alert" className="text-sm text-red-400">
+            {sessionError}
+          </p>
+        )}
+
+        <SessionCardsList
+          sessionCards={sessionCards}
+          lastCapture={lastCapture}
+          lastAction={lastAction}
+          showEmptyHint={sessionActive && !lastCapture && sessionCards.length === 0}
+          onUndo={handleUndoLastCapture}
+        />
+
+        {sessionCards.length > 0 && (
+          <>
+            {sessionTarget === "collection" ? (
+              <div className="flex flex-col gap-2 border-t border-tappd-border pt-3">
+                <button
+                  type="button"
+                  onClick={handleSaveToCollection}
+                  disabled={savingToCollection}
+                  className="self-start rounded-full bg-tappd-accent px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-tappd-accent/90 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {savingToCollection ? t("savingToCollection") : t("saveToCollectionButton")}
+                </button>
+
+                {saveToCollectionError && (
+                  <p role="alert" className="text-sm text-red-400">
+                    {saveToCollectionError}
+                  </p>
+                )}
+
+                {saveToCollectionSuccess && (
+                  <p role="status" className="text-sm text-tappd-accent">
+                    {t("saveToCollectionSuccess", {
+                      total: saveToCollectionSuccess.addedTotal,
+                      unique: saveToCollectionSuccess.addedUnique,
+                    })}
+                  </p>
+                )}
+              </div>
+            ) : (
+              <div className="flex flex-col gap-2 border-t border-tappd-border pt-3">
+                <button
+                  type="button"
+                  onClick={() => setShowExportPreview((prev) => !prev)}
+                  className="self-start rounded-full border border-tappd-accent px-5 py-2.5 text-sm font-semibold text-tappd-accent transition-colors hover:bg-tappd-accent/10"
+                >
+                  {showExportPreview ? t("exportHide") : t("exportShow")}
+                </button>
+
+                {showExportPreview && (
+                  <>
+                    <textarea
+                      readOnly
+                      value={exportCsv}
+                      rows={6}
+                      className="w-full resize-none rounded-lg border border-tappd-border bg-tappd-bg p-3 font-mono text-xs text-tappd-text focus:border-tappd-accent focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleCopyExportCsv}
+                      className="self-start rounded-full bg-tappd-accent px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-tappd-accent/90"
+                    >
+                      {exportCopied ? t("csvCopied") : t("copyCsv")}
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      <div className="flex flex-col gap-3">
+        <h2 className="text-sm font-semibold text-tappd-text">{t("savedProfilesTitle")}</h2>
+
+        {deleteError && (
+          <p role="alert" className="text-sm text-red-400">
+            {deleteError}
+          </p>
+        )}
+
+        {profiles.length === 0 ? (
+          <p className="text-sm text-tappd-text-secondary">{t("noProfiles")}</p>
+        ) : (
+          <ul className="flex flex-col gap-2">
+            {profiles.map((profile) => (
+              <li
+                key={profile.id}
+                className="flex items-center justify-between rounded-2xl border border-tappd-border bg-tappd-surface p-3"
+              >
+                <div>
+                  <p className="text-sm font-medium text-tappd-text">{profile.name}</p>
+                  <p className="text-xs text-tappd-text-secondary">{profile.languages.join(", ")}</p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => handleLoadProfile(profile)}
+                    className="text-xs font-medium text-tappd-accent hover:underline"
+                  >
+                    {t("loadProfile")}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteProfile(profile)}
+                    className="text-xs font-medium text-red-400 hover:underline"
+                  >
+                    {t("deleteProfile")}
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      {showSessionSetup && (
+        <SessionSetupDialog
+          profiles={profiles}
+          setupProfileId={setupProfileId}
+          setupLanguageUniverse={setupLanguageUniverse}
+          setupLanguages={setupLanguages}
+          setupTarget={setupTarget}
+          setupSelectedSet={setupSelectedSet}
+          onProfileChange={handleSetupProfileChange}
+          onToggleLanguage={toggleSetupLanguage}
+          onTargetChange={setSetupTarget}
+          onSelectedSetChange={setSetupSelectedSet}
+          onCancel={() => setShowSessionSetup(false)}
+          onConfirm={handleConfirmSessionSetup}
+        />
+      )}
+
+      {showSetSwitcher && (
+        <Modal onClose={() => setShowSetSwitcher(false)} labelledBy="scan-set-switcher-title">
+          <div className="flex w-full max-w-md flex-col gap-4 rounded-2xl border border-tappd-border bg-tappd-surface p-5">
+            <h2 id="scan-set-switcher-title" className="text-lg font-bold text-tappd-text">{t("setSwitcherTitle")}</h2>
+            <SetAutocomplete value={sessionSet} onSelect={handleSetSwitcherSelect} />
+            <div className="flex justify-end">
+              <button
+                type="button"
+                onClick={() => setShowSetSwitcher(false)}
+                className="rounded-full px-4 py-2 text-sm font-medium text-tappd-text-secondary hover:text-tappd-text"
+              >
+                {t("setupCancel")}
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {pendingConfirmation && (
+        <PendingConfirmationPanel
+          pendingConfirmation={pendingConfirmation}
+          onAnswerFoil={handleAnswerFoil}
+          onAnswerLanguage={handleAnswerLanguage}
+          onAnswerSetSuggestion={handleAnswerSetSuggestion}
+        />
+      )}
+    </div>
+  );
+}

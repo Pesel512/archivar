@@ -1,0 +1,32 @@
+/**
+ * Kapselt die OCR-Engine hinter einem austauschbaren Interface — Iteration A/B
+ * nutzt `TesseractOcrProvider` (PWA-Fallback), Iteration E kann später eine
+ * ML-Kit-Implementierung (Capacitor, nativ) danebenstellen, ohne den Scan-Loop
+ * anzufassen.
+ */
+export interface OcrResult {
+  text: string;
+  confidence: number;
+}
+
+/** Ein bereits auf die ROI zugeschnittenes Bild (Canvas reicht für Video-Frames). */
+export type OcrImageSource = HTMLCanvasElement;
+
+/**
+ * `"full"`: Ziffern + Großbuchstaben (Collector Number, Set-Code, Sprachcode).
+ * `"numberOnly"`: nur Ziffern + Kleinbuchstaben-Suffixe — für Sessions mit
+ * optionaler Set-Vorauswahl, bei denen kein Set-Code/Sprachcode mehr aus dem
+ * Bild gelesen werden muss (siehe `ScanCalibration.tsx`, Praxis-Feedback-
+ * Politur). Engine-agnostisch benannt (Modus statt Rohstring), damit eine
+ * spätere ML-Kit-Implementierung (Iteration E) den Modus anders umsetzen
+ * kann, ohne das Interface zu ändern.
+ */
+export type OcrCharacterMode = "full" | "numberOnly";
+
+export interface OcrProvider {
+  recognize(image: OcrImageSource): Promise<OcrResult>;
+  /** Wechselt den Zeichen-Modus auf dem bereits laufenden Worker (kein Neustart nötig). No-Op, wenn der Modus bereits aktiv ist. */
+  setCharacterMode(mode: OcrCharacterMode): Promise<void>;
+  /** Gibt die Engine-Ressourcen frei (z.B. den Tesseract-Worker). Nach dem Aufruf ist die Instanz nicht mehr nutzbar. */
+  terminate(): Promise<void>;
+}
