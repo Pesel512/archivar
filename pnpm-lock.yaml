@@ -196,6 +196,21 @@ importers:
 
   apps/standalone:
     dependencies:
+      '@pesel512/archivar-camera':
+        specifier: workspace:*
+        version: link:../../packages/camera
+      '@pesel512/archivar-core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@pesel512/archivar-ocr':
+        specifier: workspace:*
+        version: link:../../packages/ocr-worker
+      '@pesel512/archivar-react':
+        specifier: workspace:*
+        version: link:../../packages/react
+      '@pesel512/archivar-scryfall':
+        specifier: workspace:*
+        version: link:../../packages/scryfall
       react:
         specifier: ^19.3.0
         version: 19.3.0

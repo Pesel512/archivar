@@ -9,7 +9,10 @@ Scryfall ab und exportiert die Sammlung als Archidekt-kompatibles CSV.
 |---|---|
 | [`packages/core`](packages/core) | Reine Domänenlogik: Domänentypen, Corner-Parser (OCR-Text → strukturiertes Reading), Stabilitäts-Reducer für den Scan-Ablauf, Merge-Logik für die Sammlung, Archidekt-CSV-Export, Set-Vorschlag. Keine Browser-APIs, keine Netzwerkaufrufe, keine Seiteneffekte — vollständig unit-testbar. |
 | [`packages/scryfall`](packages/scryfall) | Scryfall-API-Client mit injiziertem `fetch`, serieller Request-Queue, Backoff bei Rate-Limiting und In-Memory-Cache für Set-Listen. |
-| [`apps/standalone`](apps/standalone) | Vite + React App: Kalibrier-Wizard und Debug-Scan für den Gerätetest (Iteration B, im Aufbau). |
+| [`packages/camera`](packages/camera) | Kamerazugriff (`getUserMedia`, Zoom, Fokus), ROI-Geometrie in normierten Koordinaten und geräteweise Kalibrierung (`localStorage`). |
+| [`packages/ocr-worker`](packages/ocr-worker) | OCR über tesseract.js (eigener Worker), Zeichen-Whitelist und Textnormalisierung vor dem Corner-Parser. |
+| [`packages/react`](packages/react) | Framework-unabhängige Scan-Schleife (Rückdruck statt fester Bildrate) plus Hooks/Komponenten für Kamera-Vorschau, ROI-Editor und Kalibrier-Wizard. |
+| [`apps/standalone`](apps/standalone) | Vite + React App: Kalibrier-Wizard (`#/calibrate`) und Dauerbetrieb-Debug-Scan (`#/debug`) für den Gerätetest. |
 
 Details zu den Konventionen (Paketgrenzen, `fetch`-Injektion, Result-Typen statt Exceptions)
 stehen in [`CLAUDE.md`](CLAUDE.md). Der Abschlussbericht zu Iteration A inkl. Coverage-Werten

@@ -11,7 +11,7 @@ Fortschritt der Loop-Blöcke aus `LOOP_PROMPT_B.md`. Ein Block pro Lauf, danach 
 - [x] B4 — `ocr-worker`
 - [x] B5 — `react`: Scan-Schleife
 - [x] B6 — `react`: Kalibrier-Bausteine
-- [ ] B7 — App-Ansichten
+- [x] B7 — App-Ansichten
 - [ ] B8 — Gerätetest vorbereiten
 - [ ] B9 — Auswertung und Abschluss
 
@@ -316,3 +316,48 @@ Fortschritt der Loop-Blöcke aus `LOOP_PROMPT_B.md`. Ein Block pro Lauf, danach 
     `CalibrationWizard`-Default-ROI).
   - `pnpm lint && pnpm typecheck && pnpm test && pnpm build` grün (192 Tests, unverändert
     gegenüber B5 — B6 hat laut Paketgrenzen-Tabelle keine eigenen Tests).
+- 2026-09-17: B7 abgeschlossen — `#/calibrate` und `#/debug` in `apps/standalone` mit den
+  Bausteinen aus B6 verdrahtet. Keine Unit-Tests (laut Paketgrenzen-Tabelle für `apps/standalone`
+  keine vorgesehen, Gerätetest folgt in B8).
+  - `apps/standalone/package.json`: Abhängigkeiten auf `@pesel512/archivar-camera/-core/-ocr/
+    -react/-scryfall` (`workspace:*`) ergänzt, `pnpm install` ausgeführt.
+  - Drei neue Hilfsmodule (keine Browser-Grenze verletzt, aber auch keine reinen Module laut
+    Tabelle — `apps/standalone` hat keine Testpflicht):
+    - `local-storage-store.ts`: `KeyValueStore`-Implementierung über `window.localStorage`, für
+      `saveCalibration`/`loadCalibration` aus `camera` (B2).
+    - `calibration-pointer.ts`: merkt sich Geräte-ID/Label der zuletzt abgeschlossenen
+      Kalibrierung unter einem eigenen `localStorage`-Schlüssel — `calibration-schema.ts` kennt
+      nur Kalibrierungen je Gerät, nicht "welches Gerät zuletzt kalibriert wurde"; das braucht
+      `#/debug`, um beim Start ohne erneute Kamera-Auswahl die richtige Kalibrierung zu laden.
+    - `scryfall-lookup.ts`: ein `ScryfallClient` (App-Lebensdauer, `fetch` hier am Rand der App
+      injiziert) plus `lookupCard(reading)`, das `CornerReading` auf
+      `ScryfallClient.getCardBySetNumber` abbildet — von `CalibrateView` und `DebugView` geteilt.
+  - `CalibrateView`: lädt beim Mount eine vorhandene Kalibrierung (über den
+    Kalibrier-Zeiger) und zeigt bei Fund eine Kurzübersicht (Auflösung, Zoom, Zeitpunkt) mit
+    „Neu kalibrieren"-Knopf statt direkt den Wizard zu zeigen — erfüllt „Beim nächsten Aufruf
+    lädt die App eine vorhandene Kalibrierung und bietet 'Neu kalibrieren' an" aus dem Prompt.
+    Ohne vorhandene Kalibrierung startet der `CalibrationWizard` aus B6 direkt. `onDone`
+    schreibt den Kalibrier-Zeiger und schaltet zurück auf die Übersicht.
+  - `DebugView`: lädt die Kalibrierung des zuletzt kalibrierten Geräts (Zeiger aus
+    `calibration-pointer.ts`), öffnet die Kamera mit `deviceId`/`requestedResolution` aus der
+    Kalibrierung und wendet den gespeicherten Zoom an; ohne Kalibrierung nur ein Verweis auf
+    `#/calibrate` (kein Kamerazugriff). Erstellt eine eigene, dauerhafte tesseract.js-Engine
+    (Lifecycle wie `ProbeScanStep` aus B6: per `useEffect` erzeugt/terminiert) und startet
+    `useScanLoop` erst, sobald Engine und Kalibrierung bereitstehen — derselbe Grund wie bei
+    `ProbeScanStep`: `useScanLoop`s zugrunde liegende Schleife übernimmt `ocr` nur einmal bei
+    der ersten `start()`. „Set fixieren"-Textfeld ruft `scan.setFixedSet` auf; „Bestätigen"/
+    „Verwerfen"-Knöpfe erscheinen nur im `confirming`-Zustand (`scan.confirm`/`scan.reject`).
+    Validierte Karten werden in einer lokalen State-Liste mit Uhrzeit gesammelt (nur
+    Sitzungsspeicher, kein Export/Persistenz, wie gefordert). Kamera-Freigabe und Schleifen-Stopp
+    beim Verlassen der Ansicht laufen automatisch über die Unmount-Effekte der Hooks aus B5/B6
+    (`useCamera`, `useScanLoop`) — kein zusätzlicher Code in `DebugView` nötig.
+  - `README.md`: Paket-Tabelle um `camera`/`ocr-worker`/`react` ergänzt (fehlten seit B2–B5),
+    `apps/standalone`-Zeile aktualisiert (nicht mehr „im Aufbau").
+  - Manuell geprüft: `pnpm dev` startet fehlerfrei (Vite-Log ohne Fehler), `curl` auf `/`,
+    `/src/routes/CalibrateView.tsx` und `/src/routes/DebugView.tsx` liefert je `200` und ein
+    fehlerfrei transformiertes Modul. Kein echter Browser in dieser Umgebung verfügbar — die
+    Kamera-/OCR-Pfade selbst (getUserMedia-Prompt, tesseract.js-Worker, Konsolenfehler) sind
+    nur am Gerätetest (B8) tatsächlich prüfbar, wie in der Akzeptanz von B7 vorgesehen
+    („soweit im Codespace prüfbar").
+  - `pnpm lint && pnpm typecheck && pnpm test && pnpm build` grün (192 Tests, unverändert
+    gegenüber B6 — `apps/standalone` hat keine Unit-Tests).

@@ -9,6 +9,11 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@pesel512/archivar-camera": "workspace:*",
+    "@pesel512/archivar-core": "workspace:*",
+    "@pesel512/archivar-ocr": "workspace:*",
+    "@pesel512/archivar-react": "workspace:*",
+    "@pesel512/archivar-scryfall": "workspace:*",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"
   },
