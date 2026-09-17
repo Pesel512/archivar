@@ -7,9 +7,9 @@
   },
   "scripts": {
     "dev": "pnpm --filter @pesel512/archivar-standalone run dev",
-    "build": "pnpm --filter @pesel512/archivar-core run build && pnpm -r run build",
+    "build": "pnpm --filter './packages/**' run build && pnpm -r run build",
     "lint": "eslint .",
-    "typecheck": "pnpm --filter @pesel512/archivar-core run build && pnpm -r run typecheck",
+    "typecheck": "pnpm --filter './packages/**' run build && pnpm -r run typecheck",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "format": "prettier --write .",

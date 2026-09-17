@@ -9,7 +9,7 @@ Fortschritt der Loop-Blöcke aus `LOOP_PROMPT_B.md`. Ein Block pro Lauf, danach 
 - [x] B2 — `camera`: reine Module
 - [x] B3 — `camera`: Browser-Module
 - [x] B4 — `ocr-worker`
-- [ ] B5 — `react`: Scan-Schleife
+- [x] B5 — `react`: Scan-Schleife
 - [ ] B6 — `react`: Kalibrier-Bausteine
 - [ ] B7 — App-Ansichten
 - [ ] B8 — Gerätetest vorbereiten
@@ -196,3 +196,62 @@ Fortschritt der Loop-Blöcke aus `LOOP_PROMPT_B.md`. Ein Block pro Lauf, danach 
     ergänzt.
   - `pnpm lint && pnpm typecheck && pnpm test && pnpm build` grün (182 Tests, +12 gegenüber
     B3).
+- 2026-09-17: B5 abgeschlossen — `packages/react` mit `scan-loop.ts` (framework-unabhängig,
+  vollständig mit Fakes testbar) und zwei dünnen Hooks (`use-camera.ts`, `use-scan-loop.ts`)
+  angelegt.
+  - `scan-loop.ts` — `createScanLoop(deps)`: Rückdruck-Schleife über `deps.schedule` (Default
+    `requestAnimationFrame`, sonst `setTimeout`), die den nächsten Frame erst greift, nachdem
+    `ocr.recognize` der vorherigen Erkennung fertig ist (kein eigener Nebenläufigkeitsschutz
+    nötig, folgt allein aus dem `await`-Ablauf in `tick()`). Pipeline je Frame: `grab` →
+    `ocr.recognize` → `normalize` (aus `ocr-worker`) → `parseCorner` (mit `machine.fixedSet`,
+    aus `core`) → `FRAME`-Action an `scanReducer`, danach `frame`-Event mit Reducer-Zustand.
+    OCR-Rate über ein gleitendes 10-Werte-Fenster der gemessenen Dauern, gemeldet höchstens
+    einmal pro Sekunde (`RATE_WINDOW`/`RATE_REPORT_INTERVAL_MS`, frei gewählt, keine Vorgabe
+    aus der Spezifikation).
+  - Validierung: Beim Übergang in `validating` (`enteredValidation` aus `core`) wird `lookup`
+    genau einmal aufgerufen. Eine `generation`-Zählvariable (erhöht in `stop()` und
+    `setFixedSet()`) verwirft verspätete `lookup`-Ergebnisse nach Stopp oder Set-Wechsel, statt
+    sie noch auf den (dann bereits veränderten) Reducer anzuwenden. Wirft `lookup` selbst
+    (statt eines `LookupResult` mit `ok: false`), wird das wie `VALIDATION_FAILED` mit
+    `reason: 'unknown'` behandelt — Netzwerkfehler o. Ä., die nicht über den Result-Typ
+    abgebildet sind, sollen die Schleife trotzdem nicht anhalten.
+  - `setFixedSet(code)`: erst `ocr.setWhitelist(code)` abwarten, danach `SET_CHANGED` an den
+    Reducer — per Test belegt (Frame während offenem `setWhitelist` bleibt `partial`, danach
+    sofort `full` mit dem neuen `fixedSet`), nicht nur per Kommentar behauptet.
+  - Fehler in `grab` (try/catch um den synchronen Aufruf) und in `recognize` (try/catch um den
+    `await`) beenden die Schleife nicht; der Frame läuft mit leerem Text weiter (→ `reading:
+    null`).
+  - `confirm()`/`reject()` reichen `USER_CONFIRMED`/`USER_REJECTED` direkt an den Reducer
+    durch; der neue Zustand zeigt sich im nächsten `frame`-Event.
+  - `use-camera.ts`: hält den zuletzt geöffneten `MediaStream`/`Track` in einem Ref, `status`
+    (`idle`/`opening`/`ready`/`error`) und `features` (aus `readFeatures`) im State;
+    `applyZoom` aktualisiert `features` bei Erfolg neu. Kein eigener Nebenläufigkeitsschutz für
+    parallele `open()`-Aufrufe — nicht gefordert, `CalibrationWizard` (B6) ruft `open()`
+    sequenziell je Schritt auf.
+  - `use-scan-loop.ts`: erstellt `createScanLoop` einmalig (lazy, per Ref), verteilt Events in
+    React-State (`state` aus `frame`, `ocrPerSecond` aus `rate`, `lastEvent` für alles). Optionen
+    (`grab`/`ocr`/`lookup`/`config`) werden über ein Ref aktuell gehalten, damit sich die
+    Schleife bei Re-Renders nicht neu aufbaut.
+  - Beide Hooks stoppen beim Unmount die Schleife bzw. schließen die Kamera (alle Tracks über
+    `closeCamera`) — per `useEffect`-Cleanup, kein Test (Browser-Hooks, laut Paketgrenzen-
+    Tabelle nur `scan-loop` mit Fakes getestet).
+  - **Root-Skripte `typecheck`/`build` korrigiert:** `react` importiert zur Laufzeit *und* für
+    Typen aus `core`, `camera`, `ocr-worker`, `scryfall` — die bisherige Reihenfolge (nur
+    `core` vorab bauen, siehe B0–B4) reichte nicht mehr; ein `rm -rf packages/*/dist && pnpm
+    typecheck` schlug mit `TS2307: Cannot find module '@pesel512/archivar-camera'` etc. fehl,
+    weil `camera`/`ocr-worker`/`scryfall` beim reinen `typecheck`-Skript (`tsc --noEmit`, kein
+    `tsup`) kein `dist/` erzeugen. `typecheck`/`build` in `package.json` bauen jetzt erst alle
+    `packages/*` (`pnpm --filter './packages/**' run build`), bevor sie rekursiv laufen —
+    reproduzierbar mit sauberem `dist/` verifiziert. `CLAUDE.md` entsprechend präzisiert
+    (Regel zu `import type` gilt nur für reine Typ-Importe, Laufzeit-Importe zwischen Paketen
+    sind erlaubt, wo tatsächlich Verhalten gebraucht wird).
+  - Alle Pflicht-Testfälle aus B5 abgedeckt (drei gleiche Frames → ein `lookup`; erfolgreicher
+    `lookup` → `validated`; fehlgeschlagener `lookup` → `validation_failed` + aktiver Cooldown;
+    kein zweiter `grab` während laufender Erkennung; `setFixedSet` ruft `setWhitelist` vor dem
+    Reset; verspätetes Ergebnis nach `stop()` verworfen; verspätetes Ergebnis nach Set-Wechsel
+    verworfen; Fehler in `recognize` stoppt nicht; Rate korrekt berechnet) plus ein Zusatztest
+    für `confirm()`. 10 neue Tests in `packages/react/src/scan-loop.test.ts`, Node-Umgebung ohne
+    jsdom, alle Browser-/Netzwerk-Abhängigkeiten (`grab`, `ocr`, `lookup`, `schedule`, `now`)
+    als Fakes injiziert.
+  - `pnpm lint && pnpm typecheck && pnpm test && pnpm build` grün, jeweils einmal zusätzlich mit
+    zuvor gelöschtem `packages/*/dist` gegengeprüft (192 Tests, +10 gegenüber B4).

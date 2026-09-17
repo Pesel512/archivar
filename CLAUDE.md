@@ -36,11 +36,17 @@ Browser-Module. Unit-Tests laufen in der Node-Umgebung von Vitest, ohne jsdom.
   `// VERIFY:` markiert und in `ITERATION_A.md` gesammelt.
 - Keine echten Netzwerkaufrufe in Tests — `fetch` wird immer gemockt.
 - Build je Paket über `tsup` (ESM + `.d.ts`).
-- Abhängige Pakete importieren Typen aus `@pesel512/archivar-core` ausschließlich per
-  `import type` (Laufzeit-Import wird vollständig wegoptimiert). Die Root-Skripte `typecheck`
-  und `build` bauen `core` deshalb explizit zuerst, da TypeScript dessen `dist/` für die
-  Typprüfung braucht. Kein `composite: true` in den Paket-`tsconfig.json`s — das bricht tsups
-  DTS-Bundler (TS6307) bei mehrdateiigen Paketen.
+- Abhängige Pakete importieren **Typen** aus anderen `@pesel512/archivar-*`-Paketen
+  ausschließlich per `import type` (Laufzeit-Import wird vollständig wegoptimiert). Braucht ein
+  Paket tatsächlich Laufzeit-Verhalten eines anderen Pakets (z. B. `react` den Reducer aus
+  `core` oder `normalize` aus `ocr-worker`), ist ein normaler Laufzeit-Import ausdrücklich
+  erlaubt — die Regel gilt nur für reine Typ-Importe. Jedes Paket löst die `@pesel512/archivar-*`-
+  Importe seiner Abhängigkeiten über deren `dist/` auf (`package.json`-Feld `types`/`main`), nicht
+  über `src/`. Die Root-Skripte `typecheck` und `build` bauen deshalb erst alle `packages/*`
+  (`pnpm --filter './packages/**' run build`), bevor sie rekursiv `typecheck`/`build` laufen
+  lassen — sonst fehlt einem Paket wie `react`, das mehrere Geschwisterpakete nutzt, deren
+  `dist/` beim eigenen Typecheck. Kein `composite: true` in den Paket-`tsconfig.json`s — das
+  bricht tsups DTS-Bundler (TS6307) bei mehrdateiigen Paketen.
 
 ## Befehle
 

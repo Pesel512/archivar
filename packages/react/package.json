@@ -1,0 +1,33 @@
+{
+  "name": "@pesel512/archivar-react",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --clean",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "peerDependencies": {
+    "react": "^19.0.0"
+  },
+  "dependencies": {
+    "@pesel512/archivar-camera": "workspace:*",
+    "@pesel512/archivar-core": "workspace:*",
+    "@pesel512/archivar-ocr": "workspace:*",
+    "@pesel512/archivar-scryfall": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/react": "^19.3.0",
+    "react": "^19.3.0",
+    "tsup": "^8.3.5",
+    "typescript": "^5.6.3"
+  }
+}
