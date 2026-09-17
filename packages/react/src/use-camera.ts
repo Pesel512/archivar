@@ -54,6 +54,13 @@ export function useCamera(): UseCameraResult {
     const requested = options?.resolution ?? requestedRef.current;
     requestedRef.current = requested;
 
+    // Ein vorheriger Stream (z. B. beim Wechsel der Kamera im Kalibrier-Wizard) muss vor dem
+    // Öffnen eines neuen geschlossen werden, sonst bleibt die alte Kamera-Kontrollleuchte an.
+    if (streamRef.current) {
+      closeCamera(streamRef.current);
+      streamRef.current = null;
+    }
+
     const result = await openCamera(options);
     if (!result.ok) {
       setState({ status: 'error', stream: null, track: null, features: null, error: result.reason });

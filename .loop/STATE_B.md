@@ -10,7 +10,7 @@ Fortschritt der Loop-Blöcke aus `LOOP_PROMPT_B.md`. Ein Block pro Lauf, danach 
 - [x] B3 — `camera`: Browser-Module
 - [x] B4 — `ocr-worker`
 - [x] B5 — `react`: Scan-Schleife
-- [ ] B6 — `react`: Kalibrier-Bausteine
+- [x] B6 — `react`: Kalibrier-Bausteine
 - [ ] B7 — App-Ansichten
 - [ ] B8 — Gerätetest vorbereiten
 - [ ] B9 — Auswertung und Abschluss
@@ -47,6 +47,17 @@ Fortschritt der Loop-Blöcke aus `LOOP_PROMPT_B.md`. Ein Block pro Lauf, danach 
   (`opencollective-postinstall`) über `pnpm approve-builds` freigegeben — geprüft, es zeigt
   nur einen Spendenhinweis, führt keine Netzwerk-/Dateisystemänderung mit Bezug zum Projekt
   aus. In `pnpm-workspace.yaml` unter `allowBuilds` vermerkt.
+- `packages/react/src/components/RoiEditor.tsx`, `DEFAULT_STEP = 0.02`: Schrittweite der
+  Pfeiltasten-Bedienung (2 % der Bildbreite/-höhe je Druck) frei gewählt, keine Vorgabe aus der
+  Spezifikation. Am Gerätetest (B8) prüfen, ob sie für eine Feinjustierung der ROI-Ecke
+  praktikabel ist. `// VERIFY:` im Code fehlt hier bewusst nicht — die Datei markiert die
+  Konstante stattdessen über einen erklärenden Kommentar plus diesen Log-Eintrag, da es sich um
+  einen UI-Tuning-Wert und keine fachliche Annahme handelt.
+- `packages/react/src/components/CalibrationWizard.tsx`, `DEFAULT_ROI`: Start-ROI nach der
+  Kamerawahl liegt zentriert (`x/y: 0.35`, `width/height: 0.3`), nicht am Rand wie ein
+  generischer Default — Begründung: Nach der Halterungs-Ausrichtung in Schritt 4 liegt die
+  Kartenecke laut Prompt bildmittig, da der Zoom zur Mitte zieht. Am Gerätetest verifizieren,
+  ob diese Annahme für beide Testgeräte (Desktop-Webcam, Handy-Halterung) zutrifft.
 
 ## Log
 
@@ -255,3 +266,53 @@ Fortschritt der Loop-Blöcke aus `LOOP_PROMPT_B.md`. Ein Block pro Lauf, danach 
     als Fakes injiziert.
   - `pnpm lint && pnpm typecheck && pnpm test && pnpm build` grün, jeweils einmal zusätzlich mit
     zuvor gelöschtem `packages/*/dist` gegengeprüft (192 Tests, +10 gegenüber B4).
+- 2026-09-17: B6 abgeschlossen — `packages/react` um sechs Kalibrier-Bausteine
+  (`CameraPreview`, `ResolutionBadge`, `ZoomControl`, `RoiEditor`, `OcrDebugPanel`,
+  `CalibrationWizard`) plus einen unterstützenden Hook (`use-video-rect.ts`) ergänzt. Keine
+  neuen Unit-Tests (laut Paketgrenzen-Tabelle für `react` nur `scan-loop` mit Fakes getestet;
+  Komponenten sind Browser-Module).
+  - `use-video-rect.ts`: reine Funktion `computeContainRect` (Geometrie für
+    `object-fit: contain`) plus Hook `useVideoRect(containerRef, videoRef)` (ResizeObserver +
+    `loadedmetadata`/`resize`-Listener). Von `CameraPreview` und `RoiEditor` genutzt, damit
+    beide dieselbe Overlay-Positionierung berechnen, ohne die Logik zu duplizieren.
+  - `CameraPreview`: Video (`object-fit: contain` — bewusst gewählt, damit beim Kalibrieren nie
+    ein Teil des Bildes durch Beschnitt verdeckt wird) plus optionaler passiver ROI-Rahmen.
+    Nimmt einen optionalen externen `videoRef` entgegen, damit `CalibrationWizard` im
+    Probescan-Schritt direkt auf das Videoelement zugreifen kann (`grabRoi`).
+  - `ResolutionBadge`: angefordert/tatsächlich, `data-resolution-shortfall`-Attribut,
+    optionale `effectivePixels`-Anzeige.
+  - `ZoomControl`: rendert `null`, wenn `features.zoom` fehlt (kein leeres Element).
+  - `RoiEditor`: eigenes Video+Overlay (statt `CameraPreview` zu verschachteln, siehe Log-Notiz
+    unten) mit Pointer-Events für Verschieben (Overlay-Körper) und Skalieren (Resize-Handle,
+    Anker `top-left`) sowie Pfeiltasten (mit Umschalt: Größe statt Position, Anker `center`) —
+    fokussierbar (`role="slider"`, `tabIndex={0}`, `aria-valuenow`). Nutzt `moveRoi`/`resizeRoi`
+    aus `camera` (B2), keine eigene Klemm-Logik.
+  - `OcrDebugPanel`: reine Anzeigekomponente, alle Werte (inkl. normalisierter Text) werden vom
+    Aufrufer übergeben statt selbst berechnet.
+  - `CalibrationWizard`: sieben Schritte als lokaler `step`-State (1–7), orchestriert
+    `useCamera`/`useScanLoop` und die fünf anderen Bausteine, speichert in Schritt 7 über
+    `saveCalibration`. Schritt 6 (Probescan) ist in eine eigene interne Komponente
+    `ProbeScanStep` ausgelagert, die mit dem Schritt mountet/unmountet — Grund: die
+    zugrunde liegende Schleife aus `use-scan-loop.ts` (B5) übernimmt ihre `ocr`-Abhängigkeit
+    nur einmal bei der ersten `start()` (anders als `grab`/`lookup`, die dynamisch über ein Ref
+    aufgelöst werden); ein einmal erstellter Hook-Aufruf könnte die tesseract.js-Engine später
+    nicht mehr austauschen. Per Mount/Unmount bekommt jeder Eintritt in Schritt 6 eine frische
+    `useScanLoop`-Instanz und damit eine frische Engine. `CalibrationWizardProps.createOcr`
+    dokumentiert per Kommentar, dass diese Funktion referenzstabil sein muss (sonst startet
+    `ProbeScanStep` bei jedem Re-Render eine neue Engine) — relevant für die Verdrahtung in B7.
+  - **Bugfix in `use-camera.ts` (aus B5):** `open()` schloss einen zuvor geöffneten Stream
+    nicht, bevor ein neuer geöffnet wurde — beim Kamerawechsel im Wizard (Schritt 1 öffnet
+    zunächst die Standardkamera für die Berechtigungsabfrage, danach wählt der Nutzer explizit
+    eine Kamera aus der Liste) wäre die alte Kontrollleuchte an geblieben und der Track nie
+    gestoppt worden. Behoben: `open()` schließt `streamRef.current`, falls vorhanden, bevor es
+    `openCamera()` erneut aufruft.
+  - Kein `RoiEditor`-Reuse von `CameraPreview`: ein Versuch, `RoiEditor` als Verschachtelung von
+    `CameraPreview` zu bauen (interaktives Overlay als Geschwisterelement daneben), scheiterte
+    an der CSS-Positionierung (`position: absolute` des interaktiven Overlays hätte sich auf
+    den falschen Vorfahren bezogen, sobald die `className` eigenes Padding/Border mitbringt).
+    `RoiEditor` rendert Video und Overlay deshalb selbst (kleine, bewusste Duplikation von
+    ca. 10 Zeilen Video-Markup statt einer fragilen Ref-Verschachtelung).
+  - Zwei neue Konstanten unter „Offene Fragen“ dokumentiert (`RoiEditor`-Schrittweite,
+    `CalibrationWizard`-Default-ROI).
+  - `pnpm lint && pnpm typecheck && pnpm test && pnpm build` grün (192 Tests, unverändert
+    gegenüber B5 — B6 hat laut Paketgrenzen-Tabelle keine eigenen Tests).
