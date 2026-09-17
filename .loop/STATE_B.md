@@ -8,7 +8,7 @@ Fortschritt der Loop-Blöcke aus `LOOP_PROMPT_B.md`. Ein Block pro Lauf, danach 
 - [x] B1 — App-Gerüst `apps/standalone`
 - [x] B2 — `camera`: reine Module
 - [x] B3 — `camera`: Browser-Module
-- [ ] B4 — `ocr-worker`
+- [x] B4 — `ocr-worker`
 - [ ] B5 — `react`: Scan-Schleife
 - [ ] B6 — `react`: Kalibrier-Bausteine
 - [ ] B7 — App-Ansichten
@@ -35,6 +35,18 @@ Fortschritt der Loop-Blöcke aus `LOOP_PROMPT_B.md`. Ein Block pro Lauf, danach 
   MDN-/Spec-Dokumentation abgeleitet, nicht an echten Browsern (v. a. mobil) verifiziert. Am
   Gerätetest (B8) mitprüfen, insbesondere die einmal geforderte Berechtigungsverweigerung.
   `// VERIFY:` im Code.
+- `packages/ocr-worker/src/whitelist.ts`, `FOIL_SEPARATORS = '★*•·.'`: ob das englische
+  Tesseract-Modell `★`, `•` und `·` überhaupt erkennen kann, ist ungeprüft. Wenn nicht, ist der
+  Foil-Hinweis in der Praxis immer `null`. Am Gerätetest (B8) mit Foil-Karten des Prüfstapels
+  festhalten. `// VERIFY:` im Code.
+- `packages/ocr-worker/src/engine.ts`, `tessedit_pageseg_mode: PSM.SINGLE_BLOCK`: aus der
+  Tappd-Referenz übernommen (dort real getestet gegenüber `AUTO`/`SPARSE_TEXT`), aber am
+  eigenen Bildausschnitt noch nicht selbst verifiziert. Am Gerätetest (B8) mitprüfen.
+  `// VERIFY:` im Code.
+- `packages/ocr-worker/package.json`: `tesseract.js`-Postinstall-Skript
+  (`opencollective-postinstall`) über `pnpm approve-builds` freigegeben — geprüft, es zeigt
+  nur einen Spendenhinweis, führt keine Netzwerk-/Dateisystemänderung mit Bezug zum Projekt
+  aus. In `pnpm-workspace.yaml` unter `allowBuilds` vermerkt.
 
 ## Log
 
@@ -145,3 +157,42 @@ Fortschritt der Loop-Blöcke aus `LOOP_PROMPT_B.md`. Ein Block pro Lauf, danach 
     Fragen“ ergänzt.
   - `pnpm lint && pnpm typecheck && pnpm test && pnpm build` grün (170 Tests, unverändert
     gegenüber B2, da B3 keine eigenen Tests hat).
+- 2026-09-17: B4 abgeschlossen — `packages/ocr-worker` mit den beiden reinen Modulen und dem
+  Browser-Modul angelegt.
+  - `whitelist.ts` — `buildWhitelist(fixedSet)`: ohne Set Ziffern + alle Großbuchstaben +
+    Leerzeichen + `/` + Foil-Trennzeichen (`★ * • · .`); mit Set nur die Buchstaben dieses
+    Set-Codes (Ziffern im Code wie bei `40K` werden herausgefiltert, da Ziffern ohnehin
+    enthalten sind) statt aller Großbuchstaben, dazu die Rarity-Buchstaben (aus dem `Rarity`-
+    Typ dupliziert — `corner-parser.ts` exportiert die zugehörige Konstante nicht) und die
+    Sprachcode-Buchstaben aus `LANGUAGE_CODE_TABLE` (aus `core` importiert). Zeichen über
+    `Set` dedupliziert, stabile Reihenfolge (Ziffern, Buchstaben, Leerzeichen, `/`,
+    Trennzeichen).
+  - `normalize.ts` — `normalize(rawText)`: pro Zeile führendes `|`-Artefakt entfernen, trimmen,
+    Mehrfach-Leerzeichen/-Tabs auf eins reduzieren, leere Zeilen verwerfen, mit `\n`
+    zusammenfügen. Keine inhaltliche Korrektur (macht `parseCorner`).
+  - `engine.ts` (Browser, laut Tappd-Referenz `TesseractOcrProvider.ts`, aber ohne deren
+    Zwei-Modus-Aufteilung — hier reicht `buildWhitelist(fixedSet)` direkt aus B2/core):
+    `createOcrEngine(opts?)` erstellt genau einen `tesseract.js`-Worker mit Sprache `eng`
+    (lädt nur ~2 MB Trainingsdaten, die Kartensprache kommt aus dem Sprachcode im Aufdruck,
+    nicht aus der OCR-Sprache) und `PSM.SINGLE_BLOCK`. `recognize`: zweiter Aufruf während
+    laufender Erkennung wird sofort (synchron, vor jedem `await`) abgewiesen
+    (`Promise.reject`), kein Queueing — Rückdruck liegt laut Prompt in der Scan-Schleife
+    (B5). `setWhitelist`: über eine interne Operationswarteschlange (`createQueue`) an
+    laufende Erkennung angehängt, wartet also, statt parallel auf den Worker zuzugreifen —
+    setzt in dieser Reihenfolge zuerst `tessedit_char_whitelist`, der Reducer-Reset
+    (`SET_CHANGED`) folgt erst in B5. `terminate` beendet den Worker.
+  - `index.ts` re-exportiert alle drei Module.
+  - `tesseract.js` als Abhängigkeit hinzugefügt; dessen harmloses Postinstall-Skript
+    (Spendenhinweis) per `pnpm approve-builds tesseract.js` freigegeben, siehe „Offene
+    Fragen“.
+  - Alle Pflicht-Testfälle aus B4 abgedeckt (`buildWhitelist` ohne Set/mit `MOM`/mit `40K`,
+    keine doppelten Zeichen, Foil-Trennzeichen immer enthalten; `normalize` für leere
+    Eingabe, Mehrfach-Leerzeichen, Artefakte) plus Zusatztests (Groß-/Kleinschreibung des
+    fixen Sets, mehrere `|` hintereinander, reine Leerzeilen). 12 neue Tests, 100 %
+    Statements/Branches/Functions/Lines für `whitelist.ts`/`normalize.ts` (separat per
+    `vitest run --coverage` mit auf diese beiden Dateien eingeschränktem `include` geprüft).
+  - `grep` auf Browser-Bezeichner in `whitelist.ts`/`normalize.ts` liefert keine Treffer.
+  - Zwei neue `// VERIFY:`-Stellen (Foil-Symbole erkennbar, PSM-Modus) unter „Offene Fragen“
+    ergänzt.
+  - `pnpm lint && pnpm typecheck && pnpm test && pnpm build` grün (182 Tests, +12 gegenüber
+    B3).
