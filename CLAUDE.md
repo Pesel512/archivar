@@ -9,9 +9,20 @@ Monorepo für einen Kartenscanner (Magic: The Gathering). pnpm-Workspace, TypeSc
   Seiteneffekte. Reine Funktionen und Reducer.
 - `packages/scryfall` — Scryfall-API-Client. Netzwerk nur über injizierten `fetch`, niemals global
   referenziert.
-- `packages/camera`, `packages/ocr-worker`, `packages/react`, `apps/standalone` — folgen in
-  Iteration B, dort Browser-/Hardware-Zugriff. Werden nicht mit Unit-Tests, sondern am echten
-  Gerät geprüft.
+- `packages/camera`, `packages/ocr-worker`, `packages/react`, `apps/standalone` — Iteration B,
+  dort Browser-/Hardware-Zugriff. Der Kalibrier-/Debug-Scan-Anteil wird zusätzlich am echten
+  Gerät geprüft, nicht nur per Unit-Test.
+
+| Paket | Name | darf nutzen | Tests |
+|---|---|---|---|
+| `packages/camera` | `@pesel512/archivar-camera` | DOM, `core` | reine Module (`roi`, `capabilities`, `calibration-schema`) |
+| `packages/ocr-worker` | `@pesel512/archivar-ocr` | DOM, tesseract.js, `core` | reine Module (`whitelist`, `normalize`) |
+| `packages/react` | `@pesel512/archivar-react` | React (peer), alle Pakete oben, `scryfall` | `scan-loop` mit Fakes |
+| `apps/standalone` | — | alles | keine Unit-Tests, Gerätetest |
+
+Browser-APIs dürfen nur in Modulen stehen, die ausdrücklich dafür vorgesehen sind (`stream.ts`,
+`frame-grab.ts`, `engine.ts`, Hooks, Komponenten). Reine Module importieren keine
+Browser-Module. Unit-Tests laufen in der Node-Umgebung von Vitest, ohne jsdom.
 
 ## Regeln
 
