@@ -7,7 +7,7 @@ Fortschritt der Loop-Blöcke aus `LOOP_PROMPT_B.md`. Ein Block pro Lauf, danach 
 - [x] B0 — Voraussetzungen prüfen
 - [x] B1 — App-Gerüst `apps/standalone`
 - [x] B2 — `camera`: reine Module
-- [ ] B3 — `camera`: Browser-Module
+- [x] B3 — `camera`: Browser-Module
 - [ ] B4 — `ocr-worker`
 - [ ] B5 — `react`: Scan-Schleife
 - [ ] B6 — `react`: Kalibrier-Bausteine
@@ -29,6 +29,12 @@ Fortschritt der Loop-Blöcke aus `LOOP_PROMPT_B.md`. Ein Block pro Lauf, danach 
   Prompt übernommen, nicht am echten Gerät verifiziert. `// VERIFY:` im Code.
 - `packages/camera/src/calibration-schema.ts`, `STORAGE_PREFIX`: Speicherschlüssel-Präfix frei
   gewählt, keine Vorgabe aus der Spezifikation. `// VERIFY:` im Code.
+- `packages/camera/src/stream.ts`, `mapGetUserMediaError`: Zuordnung der `getUserMedia`-
+  Fehlernamen (`NotAllowedError`, `NotFoundError`, `OverconstrainedError`, `NotReadableError`,
+  `TrackStartError`, `AbortError`, `SecurityError`) zu unseren fünf Reason-Codes ist aus der
+  MDN-/Spec-Dokumentation abgeleitet, nicht an echten Browsern (v. a. mobil) verifiziert. Am
+  Gerätetest (B8) mitprüfen, insbesondere die einmal geforderte Berechtigungsverweigerung.
+  `// VERIFY:` im Code.
 
 ## Log
 
@@ -104,3 +110,38 @@ Fortschritt der Loop-Blöcke aus `LOOP_PROMPT_B.md`. Ein Block pro Lauf, danach 
     „Offene Fragen“ ergänzt.
   - `pnpm lint && pnpm typecheck && pnpm test && pnpm build` grün (170 Tests, +28 gegenüber
     B1).
+- 2026-09-17: B3 abgeschlossen — `packages/camera` um die beiden Browser-Module ergänzt. Keine
+  Unit-Tests (laut Paketgrenzen-Tabelle nur für die reinen Module aus B2 vorgesehen); Prüfung
+  am echten Gerät folgt in B8.
+  - `stream.ts` — Exporte:
+    - `openCamera(options?)`: fordert per `getUserMedia` standardmäßig 3840 × 2160 (`ideal`)
+      an; ohne `deviceId` `facingMode: { ideal: 'environment' }` (per `options.facingMode`
+      überschreibbar), mit `deviceId` wird `facingMode` ignoriert. Fehlt
+      `navigator.mediaDevices.getUserMedia` (unsicherer Kontext oder zu alter Browser), liefert
+      sofort `{ ok: false, reason: 'insecure_context' }` ohne Aufruf. Sonst Fehler von
+      `getUserMedia` über `mapGetUserMediaError` auf die fünf Reason-Codes abgebildet.
+    - `listCameras()`: `enumerateDevices`, gefiltert auf `videoinput`; `labelsAvailable: true`
+      nur, wenn mindestens ein Label nicht leer ist (Signal für erteilte Berechtigung).
+    - `readFeatures(track, requested)`: ruft `getCapabilities`/`getSettings` nur auf, wenn als
+      Funktion vorhanden, reicht das Ergebnis unverändert an `toCameraFeatures` aus B2 weiter.
+    - `applyZoom(track, value)`: prüft zuerst, ob `getCapabilities().zoom` existiert (sonst
+      `{ ok: false, reason: 'not_supported' }`), sonst `applyConstraints({ advanced: [{ zoom
+      }] })`, Fehler dabei → `{ ok: false, reason: 'unknown' }`.
+    - `setContinuousFocus(track)`: nur falls `'continuous'` in `getCapabilities().focusMode`
+      enthalten ist; jeder Fehlschlag (nicht unterstützt oder von `applyConstraints`
+      abgelehnt) wird stillschweigend geschluckt, wie in der Spezifikation gefordert.
+    - `closeCamera(stream)`: stoppt alle Tracks aus `stream.getTracks()`, nicht nur den
+      Video-Track.
+  - `frame-grab.ts` — Export `grabRoi(video, roi, target?)`: liefert `null`, solange
+    `video.readyState < HAVE_CURRENT_DATA` (Wert 2, kein eigener Zugriff auf die
+    Instanz-Konstante nötig); berechnet den Pixelausschnitt über `toPixelRect` aus B2 und
+    zeichnet ihn unskaliert per `drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh)` in ein
+    wiederverwendbares `target`-Canvas oder ein neu erzeugtes (bevorzugt `OffscreenCanvas`,
+    sonst `HTMLCanvasElement`) — keine Herunterskalierung, keine Filter.
+  - `index.ts` re-exportiert beide neuen Module.
+  - Verifiziert: `grep` auf Browser-Bezeichner in `roi.ts`/`capabilities.ts`/
+    `calibration-schema.ts` weiterhin ohne Treffer — die reinen Module aus B2 sind unverändert.
+  - Eine neue `// VERIFY:`-Stelle (Fehler-Mapping in `mapGetUserMediaError`) unter „Offene
+    Fragen“ ergänzt.
+  - `pnpm lint && pnpm typecheck && pnpm test && pnpm build` grün (170 Tests, unverändert
+    gegenüber B2, da B3 keine eigenen Tests hat).
