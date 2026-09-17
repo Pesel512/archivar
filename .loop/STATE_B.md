@@ -12,7 +12,7 @@ Fortschritt der Loop-Blöcke aus `LOOP_PROMPT_B.md`. Ein Block pro Lauf, danach 
 - [x] B5 — `react`: Scan-Schleife
 - [x] B6 — `react`: Kalibrier-Bausteine
 - [x] B7 — App-Ansichten
-- [ ] B8 — Gerätetest vorbereiten
+- [x] B8 — Gerätetest vorbereiten
 - [ ] B9 — Auswertung und Abschluss
 
 ## Offene Fragen
@@ -361,3 +361,15 @@ Fortschritt der Loop-Blöcke aus `LOOP_PROMPT_B.md`. Ein Block pro Lauf, danach 
     („soweit im Codespace prüfbar").
   - `pnpm lint && pnpm typecheck && pnpm test && pnpm build` grün (192 Tests, unverändert
     gegenüber B6 — `apps/standalone` hat keine Unit-Tests).
+- 2026-09-17: B8 abgeschlossen — `.loop/DEVICE_TEST_B.md` angelegt (Protokoll für Desktop-Webcam
+  und Handy: Kenndaten-Tabelle, die 13 Prüfpunkte aus dem Prompt als OK/Problem/Beobachtung-
+  Tabelle, plus die vier Beobachtungsfelder für offene Annahmen — Sprachcodes/Trennzeichen am
+  Prüfstapel, `★`/`•`/`·`-Erkennung, PSM-Modus, HMR über den weitergeleiteten Port). Keine
+  Codeänderung außer Dokumentation.
+  - `README.md`: Abschnitt „Gerätetest durchführen" unter „App auf dem Handy öffnen" ergänzt
+    (Ablauf: App öffnen → `#/calibrate` durchlaufen → `#/debug`-Prüfpunkte abarbeiten →
+    Protokoll committen).
+  - `pnpm lint && pnpm typecheck && pnpm test && pnpm build` grün (192 Tests, unverändert
+    gegenüber B7 — reine Dokumentationsänderung).
+  - **Warte auf Gerätetest durch Pascal.** B9 (Auswertung) erst nach ausgefülltem
+    `DEVICE_TEST_B.md`.

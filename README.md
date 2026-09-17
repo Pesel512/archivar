@@ -48,6 +48,22 @@ Codespace:
    HTTPS-Anforderung von `getUserMedia`.
 4. Nach dem Test die Sichtbarkeit wieder auf **Private** zurückstellen.
 
+### Gerätetest durchführen
+
+Protokoll: [`.loop/DEVICE_TEST_B.md`](.loop/DEVICE_TEST_B.md) — getrennt für Desktop-Webcam und
+Handy auszufüllen.
+
+1. App wie oben („App auf dem Handy öffnen") auf dem jeweiligen Gerät öffnen.
+2. `#/calibrate` durchlaufen: Kamera wählen, Auflösung/Zoom prüfen, Halterung so ausrichten,
+   dass die untere linke Kartenecke (Sammlernummer + Set-Code) bildmittig liegt — der Zoom zieht
+   zur Mitte, nicht zum ROI —, Ausschnitt festlegen, Probescan bis eine Karte validiert, Kalibrierung
+   speichern.
+3. Auf `#/debug` die Prüfpunkte aus `DEVICE_TEST_B.md` der Reihe nach abarbeiten, dabei
+   Rohtext-Beispiele aus dem `OcrDebugPanel` für die offenen Annahmen (Sprachcodes,
+   Foil-Trennzeichen) wörtlich übernehmen.
+4. Ausgefülltes Protokoll committen — Block B9 wertet es aus und leitet daraus die
+   `StabilityConfig`-Standardwerte ab.
+
 ## Iterationen
 
 - **Iteration A** (abgeschlossen): `core` + `scryfall` — reine Logik, vollständig per Unit-Test
